@@ -114,7 +114,7 @@ class Controller(object):
         try:
             header = unpack(header)
         except:
-            log."couldn't unpack header"
+            print "couldn't unpack header"
             return False
         
         if not isinstance(header, dict):

@@ -22,6 +22,7 @@ import messages
 from messages import unpack, send_message_pickle as send_message
 from session import Message
 import logging
+from log import log # a Logger object
 
 # from messages import json # use the same import switches
 
@@ -113,7 +114,7 @@ class Controller(object):
         try:
             header = unpack(header)
         except:
-            print "couldn't unpack header"
+            log."couldn't unpack header"
             return False
         
         if not isinstance(header, dict):

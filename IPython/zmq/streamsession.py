@@ -4,8 +4,10 @@
 
 
 import os
-import uuid
+import sys
+import traceback
 import pprint
+import uuid
 
 import zmq
 
@@ -35,6 +37,17 @@ else:
     default_packer = pickle_packer
     default_unpacker = pickle.loads
 
+def wrap_exception():
+    etype, evalue, tb = sys.exc_info()
+    tb = traceback.format_exception(etype, evalue, tb)
+    exc_content = {
+        u'status' : u'error',
+        u'traceback' : tb,
+        u'etype' : unicode(etype),
+        u'evalue' : unicode(evalue)
+    }
+    return exc_content
+
 class Message(object):
     """A simple message object that maps dict keys to attributes.
 
@@ -43,7 +56,7 @@ class Message(object):
     
     def __init__(self, msg_dict):
         dct = self.__dict__
-        for k, v in msg_dict.iteritems():
+        for k, v in dict(msg_dict).iteritems():
             if isinstance(v, dict):
                 v = Message(v)
             dct[k] = v
@@ -189,7 +202,7 @@ class StreamSession(object):
         else:
             message['content'] = msg[-1]
         
-        return Message(message)
+        return message
             
         
 

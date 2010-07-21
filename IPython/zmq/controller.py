@@ -20,7 +20,7 @@ from zmq.eventloop import zmqstream
 from uuid import uuid4 as new_uuid
 # import messages
 # from messages import unpack, send_message_pickle as send_message
-from streamsession import Message, default_unpacker as unpack, default_packer as pack
+from streamsession import Message, wrap_exception # default_unpacker as unpack, default_packer as pack
 import logging
 from log import logger # a Logger object
 
@@ -33,45 +33,66 @@ from log import logger # a Logger object
 class EngineConnector(object):
     """A simple object for accessing the various zmq connections of an object.
     Attributes are:
-    heartbeat
-    queue
+    id (int): engine ID
+    uuid (str): uuid (unused?)
+    queue (str): identity of queue's XREQ socket
+    registration (str): identity of registration XREQ socket
+    heartbeat (str): identity of heartbeat XREQ socket
     """
-    queue = None
     id=0
     uuid=None
     queue=None
-    reg_id=None
+    registration=None
     heartbeat=None
     pending=None
     
-    def __init__(self, id, uuid, queue, reg_id=None, heartbeat=None):
+    def __init__(self, id, uuid, queue, registration, heartbeat=None):
         logger.info("engine::Engine Connected: %i"%id)
         self.id = id
         self.uuid = uuid
         self.queue = queue
-        self.reg_id = reg_id
+        self.registration = registration
         self.heartbeat = heartbeat
-        self.pending=set()
         
 class Controller(object):
-    """The IPython Controller with 0MQ connections"""
+    """The IPython Controller with 0MQ connections
+    
+    Parameters
+    ==========
+    loop: zmq IOLoop instance
+    session: StreamSession object
+    <removed> context: zmq context for creating new connections (?)
+    registrar: ZMQStream for engine registration requests (XREP)
+    clientele: ZMQStream for client connections (XREP)
+                not used for jobs, only query/control commands
+    queue: ZMQStream for monitoring the command queue (SUB)
+    heartbeat: HeartBeater object checking the pulse of the engines
+    db_stream: connection to db for out of memory logging of commands
+                NotImplemented
+    queue_addr: zmq connection address of the XREP socket for the queue
+    hb_addr: zmq connection address of the PUB socket for heartbeats
+    task_addr: zmq connection address of the XREQ socket for task queue
+    """
     
     ids=None
     engines=None
     clients=None
-    loop=None
-    context=None
-    registrar=None
-    client_stream=None
-    heartbeat=None
-    db_stream=None
-    engine_addr='tcp://127.0.0.1'
     hearts=None
-    #
-    queues=None
+    pending=None
     results=None
     
-    def __init__(self, loop, session, context, registrar, client_stream, heartbeat, db_stream, engine_addr=None):
+    loop=None
+    registrar=None
+    clientelle=None
+    queue=None
+    heartbeat=None
+    db=None
+    queue_addr=None
+    hb_addr=None
+    task_addr=None
+    
+    
+    def __init__(self, loop, session, registrar, clientele, queue, heartbeat, db, queue_addr, hb_addr, task_addr=None):
         """
         loop: IOLoop for creating future connections
         session: streamsession for sending serialized data
@@ -84,37 +105,44 @@ class Controller(object):
         """
         self.ids = set()
         self.engines = {}
+        self.by_ident = {}
         self.clients = {}
         self.hearts = {}
+        
         # self.sockets = {}
         self.loop = loop
         self.session = session
-        self.context = context
         self.registrar = registrar
-        self.client_stream = client_stream
+        self.clientele = clientele
+        self.queue = queue
         self.heartbeat = heartbeat
-        self.db_stream = db_stream
-        if engine_addr:
-            self.engine_addr = engine_addr
+        self.db = db
+        
+        self.queue_addr = queue_addr
+        self.hb_addr = hb_addr
+        self.task_addr = task_addr
+        
+        self.addrs = dict(queue=queue_addr, heartbeat=hb_addr, task=task_addr)
+        
         # register our callbacks
-        self.registrar.on_recv(self.recv_reg_request)
-        self.client_stream.on_recv(self.recv_client_msg)
+        self.registrar.on_recv(self.dispatch_register_request)
+        self.clientele.on_recv(self.dispatch_client_msg)
+        self.queue.on_recv(self.dispatch_queue_traffic)
+        
         self.heartbeat = heartbeat
         if heartbeat is not None:
-            # heartbeat.add_new_heart_handler(self.)
             heartbeat.add_heart_failure_handler(self.handle_heart_failure)
-            # self.heartbeat.on_recv(self.recv_heartbeat)
-        if self.db_stream is not None:
-            self.db_stream.on_recv(self.recv_db)
+        
+        if self.db is not None:
+            self.db.on_recv(self.dispatch_db)
             
-        
-        self.client_handlers = {'relay_request': self.relay_request,
+        self.client_handlers = {'queue_status': self.queue_status,
                                 }
-        
+        # 
         # this is the stuff that will move to DB:
-        self.queues = {}
-        self.results = {}
-        self.pending = {}
+        self.results = {} # completed results
+        self.pending = {} # pending messages, keyed by msg_id
+        self.queues = {} # pending msg_ids keyed by engine_id
         
         logger.info("controller::created controller")
     
@@ -125,6 +153,8 @@ class Controller(object):
             newid += 1
         return newid, new_uuid()
     
+    
+    ######### message validation methods #############
     def _validate_targets(self, targets):
         """turn any valid targets argument into a list of ids"""
         if targets is None:
@@ -141,67 +171,79 @@ class Controller(object):
     def _validate_client_msg(self, msg):
         """validates and unpacks headers of a message. Returns False if invalid,
         (ident, header, parent, content)"""
-        ident = msg[0]
+        client_id = msg[0]
         try:
-            msg = self.session.unpack_message(msg[1:], content=False)
+            msg = self.session.unpack_message(msg[1:], content=True)
         except:
             logger.error("client::Invalid Message %s"%msg)
             return False
         
-        
-        if msg.msg_type == "relay_request":
-            if not hasattr(msg.header, 'targets'):
-                return False
-        elif msg.msg_type == "task_request":
-            pass
-        
+        msg_type = msg.get('msg_type', None)
+        if msg_type is None:
+            return False
+        header = msg.get('header')
         # session doesn't handle split content for now:
-        return ident, msg
+        return client_id, msg
         
+    
     
     ###### message handlers and dispatchers ######
     
-    def handle_heart_failure(self, heart):
-        eid = self.hearts.get(heart, None)
-        if eid is None:
-            logger.info("heartbeat::ignoring heart failure %s"%heart)
-        else:
-            self.unregister_engine(eid)
-    
-    def recv_reg_request(self, msg):
+    def dispatch_register_request(self, msg):
         """"""
-        ident = msg[0]
+        logger.debug("registration::dispatch_register_request(%s)"%msg)
+        reg_id = msg[0]
         try:
             msg = self.session.unpack_message(msg[1:])
         except Exception, e:
             logger.error("registration::got bad registration message: %s"%msg)
             raise e
             return
-        if msg.msg_type == "registration_request":
+        msg_type = msg['msg_type']
+        content = msg['content']
+        if msg_type == "registration_request":
+            try:
+                queue = content['queue']
+            except KeyError:
+                logger.error("registration::queue not specified")
+                return
+            hb = content.get('heartbeat', None)
             logger.info("registration::registering with "+str(msg))
+            self.register_engine(queue, reg_id, hb)
+        elif msg_type == "unregistration_request":
             try:
-                hb = msg.content.heartbeat
-            except AttributeError:
-                hb=None
-            self.register_engine(ident, hb)
-        elif msg.msg_type == "unregistration_request":
-            try:
-                eid=int(ident)
+                eid = content['id']
             except:
-                logger.error("registration::bad engine id for unregistration: %s"%ident)
+                logger.error("registration::bad engine id for unregistration: %s"%reg_id)
                 return
             logger.info("registration::unregistering with "+str(msg))
-            self.unregister_engine(ident)
+            self.unregister_engine(eid)
         else:
             logger.error("registration::got bad registration message: %s"%msg)
     
-    def recv_client_msg(self, msg):
+    def dispatch_queue_traffic(self, msg):
+        """all queue messages will have both """
+        logger.debug("queue traffic: %s"%msg)
+        if msg[0] == 'in':
+            self.save_queue_request(msg[1:])
+        elif msg[0] == 'out':
+            self.save_queue_result(msg[1:])
+        else:
+            logger.error("Invalid message tag: %s"%msg[0])
+        
+    
+    def dispatch_client_msg(self, msg):
         """"""
+        logger.debug("client::%s"%msg)
+        ident = msg[0]
         valid = self._validate_client_msg(msg)
-        if not valid:
-            logger.error("BAD CLIENT MESSAGE: %s"%msg)
-            self.session.send(self.client_stream, "failure", ident=msg[0], 
-                    content=dict(error=str(SyntaxError("BAD CLIENT MESSAGE"))))
+        try:
+            assert valid, "Bad Client Message: %s"%msg
+        except:
+            content = wrap_exception()
+            logger.error("Bad Client Message: %s"%msg)
+            self.session.send(self.client_stream, "controller_error", ident=ident, 
+                    content=content)
             return
         else:
             ident, msg = valid
@@ -209,21 +251,143 @@ class Controller(object):
         # print ident, header, parent, content
         #switch on message type:
         handler = self.client_handlers.get(msg.msg_type, None)
-        if handler is None:
-            logger.error("BAD MESSAGE TYPE")
-            self.session.send(self.client_stream, "failure", ident=ident, 
-                    content=dict(error=str(SyntaxError("BAD CLIENT MESSAGE"))))
+        try:
+            assert handler is not None, "Bad Message Type: %s"%msg.msg_type
+        except:
+            content = wrap_exception()
+            logger.error("Bad Message Type: %s"%msg.msg_type)
+            self.session.send(self.client_stream, "controller_error", ident=ident, 
+                    content=content)
             return
         else:
             handler(ident, msg)
+            
+    def dispatch_db(self, msg):
+        """"""
+        raise NotImplementedError
     
+    ######   end dispatchers   ######
+    ######   begin handlers   ######
+    
+    def handle_heart_failure(self, heart):
+        """handler to attach to heartbeater.
+        called when a previously registeredheart fails to respond to beat request.
+        triggers unregistration"""
+        logger.debug("heartbeat::handle_heart_failure(%s)"%heart)
+        eid = self.hearts.get(heart, None)
+        if eid is None:
+            logger.info("heartbeat::ignoring heart failure %s"%heart)
+        else:
+            self.unregister_engine(eid)
+    
+    def save_queue_request(self, msg):
+        client_id, queue_id = msg[:2]
+        try:
+            msg = self.session.unpack(msg[2:],content=False)
+        except:
+            logger.error("queue::client %s sent invalid message to %s: %s"%(client_id, queue_id, msg[2:]))
+        
+        eid = self.by_ident.get(queue_id, None)
+        if eid is None:
+            logger.error("queue::target %s not registered"%queue_id)
+            logger.debug("queue::    valid are: %s"%(self.by_ident.keys()))
+            return
+            
+        header = msg['header']
+        msg_id = header['msg_id']
+        self.pending[msg_id] = msg
+        self.queues[eid].add(msg_id)
+    
+    def save_queue_result(self, msg):
+        queue_id, client_id = msg[:2]
+        try:
+            msg = self.session.unpack(msg[2:],content=False)
+        except:
+            logger.error("queue::engine %s sent invalid message to %s: %s"%(client_id, queue_id, msg[2:]))
+        
+        eid = self.by_ident.get(queue_id, None)
+        if eid is None:
+            logger.error("queue::unknown engine %s is sending a reply: "%queue_id)
+            logger.debug("queue::       %s"%msg[2:])
+            return
+        
+        parent = msg['parent_header']
+        msg_id = parent['msg_id']
+        self.results[msg_id] = msg
+        if msg_id in self.pending:
+            self.pending.pop(msg_id)
+            self.queus[eid].remove(msg_id)
+            
+        
+    
+    def register_engine(self, queue, reg, heart):
+        """register a new engine, and create the socket(s) necessary"""
+        eid,uid = self._new_id()
+        logger.debug("registration::register_engine(%i, %s,%s, %s)"%(eid, queue, reg, heart))
+        self.ids.add(eid)
+        
+        self.engines[eid] = EngineConnector(eid, uid, queue, reg, heart)
+        self.by_ident[queue] = self.engines[eid]
+        self.queues[eid] = set()
+        
+        self.hearts[heart] = eid
+        content = dict(id=eid)
+        content.update(self.addrs)
+        self.session.send(self.registrar, "registration_reply", 
+                content=content, 
+                ident=reg)
+        return eid,uid
+    
+    def unregister_engine(self, eid):
+        logger.info("registration::unregister_engine(%s)"%eid)
+        self.ids.remove(eid)
+        ec = self.engines.pop(eid)
+        self.hearts.pop(ec.heartbeat)
+        self.by_ident.pop(ec.queue)
+        
+        for msg_id in self.queues.pop(eid):
+            msg = self.pending.pop(msg_id)
+            # HANDLE IT #########################################################
+            
+    
+    def check_load(self, targets=None):
+        targets = self._build_targets(targets)
+        return [1]*len(self.ids)
+        for eid in targets:
+            ec = self.engines[eid]
+    
+    def queue_status(self, msg):
+        pass
+
+
+############ OLD METHODS for Python Relay Controller ###################
+    def _validate_engine_msg(self, msg):
+        """validates and unpacks headers of a message. Returns False if invalid,
+        (ident, message)"""
+        ident = msg[0]
+        try:
+            msg = self.session.unpack_message(msg[1:], content=False)
+        except:
+            logger.error("engine.%s::Invalid Message %s"%(ident, msg))
+            return False
+        
+        try:
+            eid = msg.header.username
+            assert self.engines.has_key(eid)
+        except:
+            logger.error("engine::Invalid Engine ID %s"%(ident))
+            return False
+        
+        return eid, msg
     def relay_request(self, ident, msg):
+        """relay a message from a client to one or more engines
+        """
         try:
             eids = self._validate_targets(msg.header.targets)
-            print eids
-        except Exception, e:
-            self.session.send(self.client_stream, "failure", 
-                    content=dict(error=str(e)),ident=ident)
+        except:
+            content = wrap_exception()
+            self.session.send(self.client_stream, "controller_error", 
+                    content=content,ident=ident)
             return
         else:
             relay_ids = []
@@ -240,14 +404,7 @@ class Controller(object):
             self.session.send(self.client_stream, 'relay_success', 
                 content=dict(relay_ids=relay_ids), parent=msg.header)
         
-            
-    
-    
-    def recv_db(self, msg):
-        """"""
-        raise NotImplementedError
-    
-    def recv_first_engine_msg(self, eid, stream, msg):
+    def dispatch_first_engine_msg(self, eid, stream, msg):
         """message handler for the first engine message, to finalize registration"""
         # TODO: finalize registration
         
@@ -259,29 +416,9 @@ class Controller(object):
             logger.error("invalid identity: %s"%msg[0])
             return
         logger.info("registration of engine %i succeeded"%eid)
-        stream.on_recv(self.recv_engine_msg)
+        stream.on_recv(self.dispatch_engine_msg)
     
-    def _validate_engine_msg(self, msg):
-        """validates and unpacks headers of a message. Returns False if invalid,
-        (ident, message)"""
-        ident = msg[0]
-        try:
-            eid = int(msg[0])
-            assert self.engines.has_key(eid)
-        except:
-            logger.error("engine::Invalid Engine ID %s"%(ident))
-            return False
-        
-        try:
-            msg = self.session.unpack_message(msg[1:], content=False)
-        except:
-            logger.error("engine.%s::Invalid Message %s"%(ident, msg))
-            return False
-        
-        # session doesn't handle split content for now:
-        return eid, msg
-    
-    def recv_engine_msg(self, msg):
+    def dispatch_engine_msg(self, msg):
         """"""
         ident = msg[0]
         print "EMSG: ", msg
@@ -312,58 +449,6 @@ class Controller(object):
         self.session.send(self.client_stream, "relay_result", parent=parent, content=msg.content,ident=client_id)
         
         return
-        # 
-        # try:
-        #     ec.stream.send_multipart(msg[1:])
-        # except:
-        #     logger.error("ERRORED:%s"%msg)
-        #     self.unregister_engine(ec.id)
-        
     
-    ######   end handlers and dispatchers   ######
-    
-    def register_engine(self, reg, heart):
-        """register a new engine, and create the sockets necessary"""
-        eid,uid = self._new_id()
-        self.ids.add(eid)
-        sock = self.context.socket(zmq.PAIR)
-        port = sock.bind_to_random_port(self.engine_addr)
-        
-        stream = zmqstream.ZMQStream(sock, self.loop)
-        stream.on_recv(lambda msg: self.recv_first_engine_msg(eid, stream, msg))
-        # stream.on_err(lambda : self.unregister_engine(eid))
-        # print "reg", socketkey
-        self.engines[eid] = EngineConnector(eid,uid,stream, reg, heart)
-        self.hearts[heart] = eid
-        self.session.send(self.registrar, "registration_reply", 
-                content=dict(addr=self.engine_addr+':'+str(port), id=eid),
-                ident=reg)
-        # self.registrar.send_multipart([socketkey, str(eid), ])
-        return eid,uid
-    
-    def unregister_engine(self, eid):
-        print "UNREGISTERING: ", eid
-        self.ids.remove(eid)
-        ec = self.engines.pop(eid)
-        self.hearts.pop(ec.heartbeat)
-        logger.info("registration::unregistering engine: %i"%eid)
-        for msg_id in ec.pending:
-            req = self.pending.pop(msg_id)
-            # HANDLE IT #########################################################
-            # client_id = 
-    
-    def check_load(self, targets=None):
-        targets = self._build_targets(targets)
-        return [1]*len(self.ids)
-        for eid in targets:
-            ec = self.engines[eid]
-            # self.heartbeat_stream.send()
-    
-    def handle_error(self,socket):
-        """handle a POLLERR event"""
-        # ???
-    
-    def handle_receive(self, socket):
-        """handle a message waiting in a queue"""
-    
+
         

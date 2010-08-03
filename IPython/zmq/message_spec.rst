@@ -32,7 +32,7 @@ where ident is the zmq socket identifier, and each following object is a
 packed version (json or pickle or custom) of the components of the message
 
 sending with a stream session:
-StreamSession.send()
+StreamSession.send(socket (or ZMQStream), msg_type, content)
 
 Side effect: (PUB/SUB)
 ======================
@@ -102,24 +102,114 @@ content = {
     matches : ['a.foo', 'a.bar']
 }
 
-Control
--------
+Controller
+----------
 
-# msg_type = 'heartbeat'
+# for unhandled messages:
+# msg_type = 'controller_error'
 content = {
-
+    status : 'error',
+    'traceback' : str,
+    'etype' : str,
+    'evalue' : str
 }
 
-Relay
------
-
-# msg_type = 'relay_request'
-subheader = {
-    targets: [0,2,5] # None|int|list of ints
-    submsg_type: 'execute_request' # the msg_type of the message to be relayed
-}
-
-# msg_type = 'relay_success'
+# msg_type = 'registration_request'
 content = {
-    relay_ids: [1,2,3] # list of ints specifying on which engines job was executed
+    queue   : '' # the queue XREQ id
+    heartbeat : '' # the heartbeat XREQ id
 }
+
+# msg_type = 'registration_reply'
+content = {
+    status : 'ok' # or 'error'
+    # if ok:
+    id : 0 # int, the engine id
+    queue : 'tcp://127.0.0.1:12345' # the connection string for engine side of the queue
+    heartbeat : (a,b) # tuple containing the two interfaces needed for heartbeat
+    task : 'tcp...' # addr for task queue, or None if no task queue running
+    # if error:
+    reason : 'queue_id already registered'
+}
+
+# msg_type = 'connection_request'
+content = {
+}
+
+# msg_type = 'connection_reply'
+content = {
+    status : 'ok' # or 'error'
+    # if ok:
+    queue : 'tcp://127.0.0.1:12345' # the connection string for the client side of the queue
+    task : 'tcp...' # addr for task queue, or None if no task queue running
+    controller : 'tcp...' # addr for controller methods, like queue_status, etc.
+    # if error:
+    reason : 'queue_id already registered' # str failure message
+}
+
+# msg_type = 'result_request'
+content = {
+    msg_id : uuid # str
+}
+
+# msg_type = '
+
+# msg_type = 'result_reply'
+content = {
+    status : 'ok' # else error
+    # if ok:
+    'a-b-c-d' : msg # the content dict is keyed by msg_ids,
+    ...             # values are the result messages
+    # if error:
+    reason : "explanation"
+}
+
+Controller PUB
+--------------
+
+# msg_type = 'registration_notification'
+content = {
+    id : 0 # engine ID that has been registered
+}
+# msg_type = 'unregistration_notification'
+content = {
+    id : 0 # engine ID that has been unregistered
+}
+
+Data
+----
+# msg_type = 'apply_message'
+content = {
+    'bound' : False # whether the message
+}
+buffers = [sf, sargs, skwargs, *data]
+
+where buffers are built by streamsession.pack_apply_message(f,args,kwargs)
+apply_messages can be unpacked with streamsession.unpack_apply_message(buffers)
+
+# msg_type = 'apply_reply'
+content = {
+    'status' : 'ok'
+}
+buffers = [sobj, *data]
+
+where buffers have been packed by streamsession.serialize_object(obj)
+and can be reconstructed with: obj = streamsession.unserialize_object(buffers)
+
+Controller Messages
+-------------------
+
+# msg_type = 'queue_status'
+content = {
+    'verbose' : True # whether return should be lists or lens
+    'targets' : list of ints
+}
+# msg_type = 'queue_status'
+content = {
+    '0' : {'completed' : 1, 'queue' : 7}
+}
+# a dict
+
+
+
+

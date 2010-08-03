@@ -10,32 +10,52 @@ import pprint
 import uuid
 
 import zmq
+from zmq.eventloop.zmqstream import ZMQStream
+
+from IPython.zmq.pickleutil import can, uncan, canSequence, uncanSequence
+from IPython.zmq.newserialized import serialize, unserialize
 
 try:
-    import json
+    import cjson
+    json = cjson
 except ImportError:
+    cjson = None
     try:
-        import simplejson as json
-    except ImportError:
-        json = None
+        import json
+    except:
+        try:
+            import simplejson as json
+        except ImportError:
+            json = None
 
 try:
-    import cPickle as pickle
+    import cPickle
+    pickle = cPickle
 except:
+    cPickle = None
     import pickle
 
-# packers
 
-json_packer = lambda o: json.dumps(o, separators=(',',':'))
-
-pickle_packer = lambda o: pickle.dumps(o, 2)
-
-if json is not None:
-    default_packer = json_packer
-    default_unpacker = json.loads
+if cjson is not None:
+    to_json = lambda o: json.encode(o)
+    from_json = json.decode
 else:
-    default_packer = pickle_packer
+    to_json = lambda o: json.dumps(o, separators=(',',':'))
+    from_json = json.loads
+
+to_pickle = lambda o: pickle.dumps(o, 2)
+
+# packer priority: cjson, cPickle, json/simplejson, pickle
+
+if cjson is not None or (cPickle is None and json is not None): # 1,3
+    default_packer = to_json
+    default_unpacker = from_json
+else: # 2,4
+    default_packer = to_pickle
     default_unpacker = pickle.loads
+# else:
+#     default_packer = to_json
+#     default_unpacker = json.loads
 
 def wrap_exception():
     etype, evalue, tb = sys.exc_info()
@@ -106,6 +126,107 @@ def extract_header(msg_or_header):
         h = dict(h)
     return h
 
+def rekey(dikt):
+    """rekey a dict that has been forced to use str keys where there should be
+    ints by json"""
+    for k,v in dikt.iteritems():
+        if isinstance(k, str):
+            try:
+                ik = int(k)
+                
+            except ValueError:
+                continue
+            else:
+                dikt[ik] = v
+                del dikt[k]
+    return dikt
+
+def serialize_object(obj, threshold=1e-3):
+    """serialize an object into a list of sendable buffers"""
+    databuffers = []
+    if isinstance(obj, (list, tuple)):
+        clist = canSequence(obj)
+        slist = map(serialize, clist)
+        for s in slist:
+            if s.getDataSize() > threshold:
+                databuffers.append(s.getData())
+                s.data = None
+        return pickle.dumps(slist,-1), databuffers
+    elif isinstance(obj, dict):
+        sobj = {}
+        for k in sorted(obj.iterkeys()):
+            s = serialize(can(obj[k]))
+            if s.getDataSize() > threshold:
+                databuffers.append(s.getData())
+                s.data = None
+            sobj[k] = s
+        return pickle.dumps(sobj,-1),databuffers
+    else:
+        s = serialize(can(obj))
+        if s.getDataSize() > threshold:
+            databuffers.append(s.getData())
+            s.data = None
+        return pickle.dumps(serialize(can(obj)),-1),databuffers
+            
+        
+def unserialize_object(bufs):
+    """reconstruct an object serialized by serialize_object"""
+    bufs = list(bufs)
+    sobj = pickle.loads(bufs.pop(0))
+    if isinstance(sobj, (list, tuple)):
+        for s in sobj:
+            if s.data is None:
+                s.data = bufs.pop(0)
+        return uncanSequence(map(unserialize, sobj))
+    elif isinstance(sobj, dict):
+        newobj = {}
+        for k in sorted(sobj.iterkeys()):
+            s = sobj[k]
+            if s.data is None:
+                s.data = bufs.pop(0)
+            newobj[k] = uncan(unserialize(s))
+        return newobj
+    else:
+        if sobj.data is None:
+            sobj.data = bufs.pop(0)
+        return uncan(unserialize(sobj))
+
+def pack_apply_message(f, args, kwargs, threshold=1e-3):
+    """pack up a function, args, and kwargs to be sent over the wire
+    as a series of buffers. Any object whose data is larger than `threshold`
+    will not have their data copied (currently only numpy arrays support zero-copy)"""
+    msg = [pickle.dumps(can(f),-1)]
+    databuffers = [] # for large objects
+    sargs, bufs = serialize_object(args,threshold)
+    msg.append(sargs)
+    databuffers.extend(bufs)
+    skwargs, bufs = serialize_object(kwargs,threshold)
+    msg.append(skwargs)
+    databuffers.extend(bufs)
+    msg.extend(databuffers)
+    return msg
+
+def unpack_apply_message(bufs, g=None):
+    """unpack f,args,kwargs from buffers packed by pack_apply_message()"""
+    bufs = list(bufs) # allow us to pop
+    assert len(bufs) >= 3, "not enough buffers!"
+    cf = pickle.loads(bufs.pop(0))
+    sargs = list(pickle.loads(bufs.pop(0)))
+    skwargs = dict(pickle.loads(bufs.pop(0)))
+    # print sargs, skwargs
+    f = cf.getFunction(g)
+    for sa in sargs:
+        if sa.data is None:
+            sa.data = bufs.pop(0)
+    args = uncanSequence(map(unserialize, sargs), g)
+    kwargs = {}
+    for k in sorted(skwargs.iterkeys()):
+        sa = skwargs[k]
+        if sa.data is None:
+            sa.data = bufs.pop(0)
+        kwargs[k] = uncan(unserialize(sa), g)
+    
+    return f,args,kwargs
 
 class StreamSession(object):
     """tweaked version of IPython.zmq.session.session, for use with pyzmq ZMQStreams"""
@@ -145,11 +266,15 @@ class StreamSession(object):
         msg['header'].update(sub)
         return msg
 
-    def send(self, stream, msg_type, content=None, subheader=None, parent=None, ident=None):
+    def send(self, stream, msg_type, content=None, buffers=None, parent=None, subheader=None, ident=None):
         """send a message via stream"""
         msg = self.msg(msg_type, content, parent, subheader)
+        buffers = [] if buffers is None else buffers
         to_send = []
-        if ident is not None:
+        if isinstance(ident, list):
+            # accept list of idents
+            to_send.extend(ident)
+        elif ident is not None:
             to_send.append(ident)
         to_send.append(self.pack(msg['header']))
         to_send.append(self.pack(msg['parent_header']))
@@ -167,12 +292,22 @@ class StreamSession(object):
         else:
             raise TypeError("Content incorrect type: %s"%type(content))
         to_send.append(content)
-        stream.send_multipart(to_send)
+        flag = 0
+        if buffers:
+            flag = zmq.SNDMORE
+        stream.send_multipart(to_send, flag, copy=False)
+        for b in buffers[:-1]:
+            stream.send(b, flag, copy=False)
+        if buffers:
+            stream.send(buffers[-1], copy=False)
         omsg = Message(msg)
         return omsg
 
     def recv(self, socket, mode=zmq.NOBLOCK, content=True):
-        """"""
+        """receives and unpacks a message
+        returns [idents], msg"""
+        if isinstance(socket, ZMQStream):
+            socket = socket.socket
         try:
             msg = socket.recv_multipart(mode)
         except zmq.ZMQError, e:
@@ -183,24 +318,45 @@ class StreamSession(object):
             else:
                 raise
         # return an actual Message object
+        # determine the number of idents by tryig to unpack them.
+        # this is terrible:
+        idents, msg = self.feed_identities(msg)
         try:
-            return self.unpack_message(msg[-3:], content)
+            return idents, self.unpack_message(msg, content)
         except Exception, e:
+            print idents, msg
             # TODO: handle it
             raise e
+    
+    def feed_identities(self, msg):
+        """This is a completely horrible thing, but it strips the zmq
+        ident prefixes off of a message. It will break if any identities
+        are unpackable"""
+        idents = []
+        while len(msg) > 3:
+            try:
+                s = self.unpack(msg[0])
+            except:
+                idents.append(msg.pop(0))
+            else:
+                break
+                
+        return idents, msg
     
     def unpack_message(self, msg, content=True):
         """return a message object from the format
         sent by self.send"""
-        assert len(msg) == 3, "malformed message"
+        assert len(msg) >= 3, "malformed message"
         message = {}
         message['header'] = self.unpack(msg[0])
         message['msg_type'] = message['header']['msg_type']
         message['parent_header'] = self.unpack(msg[1])
         if content:
-            message['content'] = self.unpack(msg[-1])
+            message['content'] = self.unpack(msg[2])
         else:
-            message['content'] = msg[-1]
+            message['content'] = msg[2]
+        
+        message['buffers'] = msg[3:]
         
         return message
             

@@ -452,7 +452,7 @@ class Client(object):
             self.spin()
             if timeout >= 0 and ( time.time()-tic ) > timeout:
                 break
-            time.sleep(0.1)
+            time.sleep(0)
         return len(theids.intersection(self.outstanding)) == 0
     
     @spinfirst

@@ -14,7 +14,8 @@ from zmq.eventloop import ioloop, zmqstream
 from streamsession import Message, StreamSession
 import streamkernel as kernel
 import heartbeat
-import log
+# from log import logger
+
 
 def printer(*msg):
     print msg
@@ -75,10 +76,10 @@ class Engine(object):
             self.kernel = kernel.Kernel(self.session, self.queue, pub, self.task_queue)
             self.kernel.start()
         else:
-            logger.error("Registration Failed: %s"%msg)
+            # logger.error("Registration Failed: %s"%msg)
             raise Exception("Registration Failed: %s"%msg)
         
-        logger.info("engine::completed registration with id %s"%self.session.username)
+        # logger.info("engine::completed registration with id %s"%self.session.username)
         
         print msg
     

@@ -1,9 +1,11 @@
 #!/usr/bin/env python
-
+"""A script to launch a controller with all its queues and connect it to a logger"""
 
 import time
 import logging
+
 import zmq
+from zmq.device import monitoredqueue as mq
 from zmq.eventloop import ioloop
 from zmq.eventloop.zmqstream import ZMQStream
 from zmq.log import handlers
@@ -11,7 +13,7 @@ from zmq.log import handlers
 from IPython.zmq import controller, log, streamsession as session, heartbeat
 
 def setup():
-    """setup a basic controller and open client,registrar, and logging ports"""
+    """setup a basic controller and open client,registrar, and logging ports. Start the Queue and the heartbeat"""
     ctx = zmq.Context()
     loop = ioloop.IOLoop()
     
@@ -24,36 +26,33 @@ def setup():
     cport = config['clientport']
     cqport = config['cqueueport']
     eqport = config['equeueport']
+    ctport = config['ctaskport']
+    etport = config['etaskport']
     hport = config['heartport']
+    nport = config['notifierport']
     
-    # create/bind log socket
+    # setup logging
     lsock = ctx.socket(zmq.PUB)
-    connected=False
-    while not connected:
-        try:
-            lsock.bind('%s:%i'%(iface,logport))
-        except:
-            logport = logport + 1
-        else:
-            connected=True
-            
+    lsock.connect('%s:%i'%(iface,logport))
+    # connected=False
+    # while not connected:
+    #     try:
+    #     except:
+    #         logport = logport + 1
+    #     else:
+    #         connected=True
+    #         
     handler = handlers.PUBHandler(lsock)
     handler.setLevel(logging.DEBUG)
     handler.root_topic = "controller"
     log.logger.addHandler(handler)
-    print "logging on %s:%i"%(iface, logport)
-    # wait for logger SUB
     time.sleep(.5)
+    
+    ### Engine connections ###
     
     # Engine registrar socket
     reg = ZMQStream(ctx.socket(zmq.XREP), loop)
     reg.bind("%s:%i"%(iface, rport))
-    
-    # clientele socket
-    c = ZMQStream(ctx.socket(zmq.XREP), loop)
-    c.bind("%s:%i"%(iface, cport))
-    # port += 1
-    thesession = session.StreamSession(username="controller")
     
     # heartbeat
     hpub = ctx.socket(zmq.PUB)
@@ -61,22 +60,54 @@ def setup():
     hrep = ctx.socket(zmq.XREP)
     hrep.bind("%s:%i"%(iface, hport+1))
     
-    hb = heartbeat.HeartBeater(loop, ZMQStream(hpub,loop), ZMQStream(hrep,loop), 5000)
+    hb = heartbeat.HeartBeater(loop, ZMQStream(hpub,loop), ZMQStream(hrep,loop), 500)
     
+    ### Client connections ###
+    # Clientele socket
+    c = ZMQStream(ctx.socket(zmq.XREP), loop)
+    c.bind("%s:%i"%(iface, cport))
+    
+    n = ZMQStream(ctx.socket(zmq.PUB), loop)
+    n.bind("%s:%i"%(iface, nport))
+    
+    thesession = session.StreamSession(username="controller")
+    
+    
+    
+    # build and launch the queue
     sub = ctx.socket(zmq.SUB)
     sub.setsockopt(zmq.SUBSCRIBE, "")
-    
     monport = sub.bind_to_random_port(iface)
     sub = ZMQStream(sub, loop)
     
-    q = zmq.TSMonitoredQueue(zmq.XREP, zmq.XREP, zmq.PUB)
+    # Multiplexer Queue
+    q = mq.TSMonitoredQueue(zmq.XREP, zmq.XREP, zmq.PUB, 'in', 'out')
     q.bind_in("%s:%i"%(iface, cqport))
     q.bind_out("%s:%i"%(iface, eqport))
     q.connect_mon("%s:%i"%(iface, monport))
     q.start()
+    # Task Queue
+    q = mq.TSMonitoredQueue(zmq.XREP, zmq.XREQ, zmq.PUB, 'intask', 'outtask')
+    q.bind_in("%s:%i"%(iface, ctport))
+    q.bind_out("%s:%i"%(iface, etport))
+    q.connect_mon("%s:%i"%(iface, monport))
+    q.start()
     time.sleep(.25)
-    con = controller.Controller(loop, thesession, reg, c, sub, hb, None, 
-            "%s:%s"%(iface, eqport),"%s:%s"%(iface, hport), None)
+    
+    # build connection dicts
+    engine_addrs = {
+        'queue': "%s:%i"%(iface, eqport),
+        'heartbeat': ("%s:%i"%(iface, hport), "%s:%i"%(iface, hport+1)),
+        'task' : "%s:%i"%(iface, etport)
+        }
+    
+    client_addrs = {
+        'controller': "%s:%i"%(iface, cport),
+        'queue': "%s:%i"%(iface, cqport),
+        'task' : "%s:%i"%(iface, ctport),
+        'notification': "%s:%i"%(iface, nport)
+        }
+    con = controller.Controller(loop, thesession, sub, reg, hb, c, n, None, engine_addrs, client_addrs)
     
     return loop
     

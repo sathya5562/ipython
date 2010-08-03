@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""A viewer that prints the topics and messages"""
+"""A simple log process that prints messages incoming from"""
 
 #
 #    Copyright (c) 2010 Min Ragan-Kelley
@@ -27,9 +27,12 @@ def main(topics, addrs):
     socket = context.socket(zmq.SUB)
     for topic in topics:
         socket.setsockopt(zmq.SUBSCRIBE, topic)
-    for addr in addrs:
-        print "Connecting to: ", addr
-        socket.connect(addr)
+    if addrs:
+        for addr in addrs:
+            print "Connecting to: ", addr
+            socket.connect(addr)
+    else:
+        socket.bind('tcp://127.0.0.1:%i'%logport)
 
     while True:
         # topic = socket.recv()
@@ -51,8 +54,8 @@ if __name__ == '__main__':
         # default to everything
         topics = ['']
     if len(addrs) < 1:
-        print "using default logports"
-        addrs = ['tcp://127.0.0.1:%i'%p for p in range(logport,logport+10)]
+        print "binding instead of connecting"
+        # addrs = ['tcp://127.0.0.1:%i'%p for p in range(logport,logport+10)]
     #     print "usage: display.py <address> [ <topic> <address>...]"
         # raise SystemExit
     

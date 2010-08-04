@@ -45,7 +45,7 @@ class OutStream(object):
                 # msg = self.session.msg(u'stream', content=content,
                 #                        parent=self.parent_header)
                 msg = self.session.send(self.pub_socket, u'stream', content=content, parent=self.parent_header)
-                print>>sys.__stdout__, Message(msg)
+                # print>>sys.__stdout__, Message(msg)
                 # self.pub_socket.send_json(msg)
                 self._buffer_len = 0
                 self._buffer = []
@@ -209,7 +209,7 @@ class Kernel(object):
         # self.reply_socket.send(ident, zmq.SNDMORE)
         # self.reply_socket.send_json(reply_msg)
         reply_msg = self.session.send(stream, u'execute_reply', reply_content, parent=parent, ident=ident)
-        print>>sys.__stdout__, Message(reply_msg)
+        # print>>sys.__stdout__, Message(reply_msg)
         if reply_msg['content']['status'] == u'error':
             self.abort_queue()
 
@@ -218,7 +218,7 @@ class Kernel(object):
                    'status' : 'ok'}
         completion_msg = self.session.send(stream, 'complete_reply',
                                            matches, parent, ident)
-        print >> sys.__stdout__, completion_msg
+        # print >> sys.__stdout__, completion_msg
 
     def complete(self, msg):
         return self.completer.complete(msg.content.line, msg.content.text)
@@ -256,7 +256,7 @@ class Kernel(object):
             resultname = prefix+"result"+suffix
             
             ns = { fname : f, argname : args, kwargname : kwargs }
-            print ns
+            # print ns
             working.update(ns)
             code = "%s=%s(*%s,**%s)"%(resultname, fname, argname, kwargname)
             exec code in working, working
@@ -290,7 +290,7 @@ class Kernel(object):
         # self.reply_socket.send(ident, zmq.SNDMORE)
         # self.reply_socket.send_json(reply_msg)
         reply_msg = self.session.send(stream, u'apply_reply', reply_content, parent=parent, ident=ident,buffers=result_buf)
-        print>>sys.__stdout__, Message(reply_msg)
+        # print>>sys.__stdout__, Message(reply_msg)
         if reply_msg['content']['status'] == u'error':
             self.abort_queue()
     

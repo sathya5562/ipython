@@ -248,7 +248,7 @@ class Controller(object):
     
     def dispatch_queue_traffic(self, msg):
         """all ME and Task queue messages come through here"""
-        logger.debug("queue traffic: %s"%msg)
+        logger.debug("queue traffic: %s"%msg[:2])
         switch = msg[0]
         idents, msg = self.session.feed_identities(msg[1:])
         if switch == 'in':
@@ -265,7 +265,6 @@ class Controller(object):
     
     def dispatch_client_msg(self, msg):
         """"""
-        logger.debug("client::%s"%msg)
         idents, msg = self.session.feed_identities(msg)
         client_id = idents[0]
         try:

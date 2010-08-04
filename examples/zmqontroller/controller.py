@@ -14,8 +14,8 @@ from IPython.zmq import controller, log, streamsession as session, heartbeat
 
 def setup():
     """setup a basic controller and open client,registrar, and logging ports. Start the Queue and the heartbeat"""
-    ctx = zmq.Context()
-    loop = ioloop.IOLoop()
+    ctx = zmq.Context(1)
+    loop = ioloop.IOLoop.instance()
     
     # port config
     # config={}
@@ -43,7 +43,7 @@ def setup():
     #         connected=True
     #         
     handler = handlers.PUBHandler(lsock)
-    handler.setLevel(logging.DEBUG)
+    handler.setLevel(logging.INFO)
     handler.root_topic = "controller"
     log.logger.addHandler(handler)
     time.sleep(.5)
@@ -61,6 +61,7 @@ def setup():
     hrep.bind("%s:%i"%(iface, hport+1))
     
     hb = heartbeat.HeartBeater(loop, ZMQStream(hpub,loop), ZMQStream(hrep,loop), 500)
+    hb.start()
     
     ### Client connections ###
     # Clientele socket

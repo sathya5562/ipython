@@ -25,6 +25,7 @@ import cPickle as pickle
 # from zope.interface import Interface, implements
 
 try:
+    raise ImportError
     import numpy
 except ImportError:
     pass
@@ -95,17 +96,19 @@ class SerializeIt(object):
     def __init__(self, unSerialized):
         self.data = None
         self.obj = unSerialized.getObject()
-        if globals().has_key('numpy'):
-            if isinstance(self.obj, numpy.ndarray):
+        if globals().has_key('numpy') and isinstance(self.obj, numpy.ndarray):
                 if len(self.obj) == 0:         # length 0 arrays can't be reconstructed
                     raise SerializationError("You cannot send a length 0 array")
                 self.obj = numpy.ascontiguousarray(self.obj, dtype=None)
                 self.typeDescriptor = 'ndarray'
                 self.metadata = {'shape':self.obj.shape,
                                  'dtype':self.obj.dtype.str}
-            else:
-                self.typeDescriptor = 'pickle'
-                self.metadata = {}
+        elif isinstance(self.obj, str):
+            self.typeDescriptor = 'bytes'
+            self.metadata = {}
+        elif isinstance(self.obj, buffer):
+            self.typeDescriptor = 'buffer'
+            self.metadata = {}
         else:
             self.typeDescriptor = 'pickle'
             self.metadata = {}
@@ -114,6 +117,8 @@ class SerializeIt(object):
     def _generateData(self):
         if self.typeDescriptor == 'ndarray':
             self.data = numpy.getbuffer(self.obj)
+        elif self.typeDescriptor in ('bytes', 'buffer'):
+            self.data = self.obj
         elif self.typeDescriptor == 'pickle':
             self.data = pickle.dumps(self.obj, 2)
         else:
@@ -142,19 +147,16 @@ class UnSerializeIt(UnSerialized):
         
     def getObject(self):
         typeDescriptor = self.serialized.getTypeDescriptor()
-        if globals().has_key('numpy'):
-            if typeDescriptor == 'ndarray':
+        if globals().has_key('numpy') and typeDescriptor == 'ndarray':
                 result = numpy.frombuffer(self.serialized.getData(), dtype = self.serialized.metadata['dtype'])
                 result.shape = self.serialized.metadata['shape']
                 # This is a hack to make the array writable.  We are working with
                 # the numpy folks to address this issue.
                 result = result.copy()
-            elif typeDescriptor == 'pickle':
-                result = pickle.loads(self.serialized.getData())
-            else:
-                raise SerializationError("Really wierd serialization error.")
         elif typeDescriptor == 'pickle':
             result = pickle.loads(self.serialized.getData())
+        elif typeDescriptor in ('bytes', 'buffer'):
+            result = self.serialized.getData()
         else:
             raise SerializationError("Really wierd serialization error.")
         return result

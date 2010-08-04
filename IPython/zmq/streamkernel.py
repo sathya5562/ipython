@@ -249,7 +249,7 @@ class Kernel(object):
             else:
                 working = dict()
                 suffix = prefix = ""
-            f,args,kwargs = unpack_apply_message(bufs, working)
+            f,args,kwargs = unpack_apply_message(bufs, working, copy=False)
             fname = prefix+f.func_name+suffix
             argname = prefix+"args"+suffix
             kwargname = prefix+"kwargs"+suffix
@@ -296,8 +296,8 @@ class Kernel(object):
     
     def recv_queue(self, stream, msg):
         # try:
-            idents,msg = self.session.feed_identities(msg)
-            msg = self.session.unpack_message(msg, content=True)
+            idents,msg = self.session.feed_identities(msg, copy=False)
+            msg = self.session.unpack_message(msg, content=True, copy=False)
             # print idents, msg
             # omsg = Message(msg)
             handler = self.handlers.get(msg['msg_type'], None)
@@ -310,9 +310,11 @@ class Kernel(object):
     
     def start(self):
         if self.reply_stream:
-            self.reply_stream.on_recv(lambda msg: self.recv_queue(self.reply_stream, msg))
+            self.reply_stream.on_recv(lambda msg: 
+                    self.recv_queue(self.reply_stream, msg), copy=False)
         if self.task_stream:
-            self.task_stream.on_recv(lambda msg: self.recv_queue(self.task_stream, msg))
+            self.task_stream.on_recv(lambda msg: 
+                    self.recv_queue(self.task_stream, msg), copy=False)
             # print self.task_stream.socket.recv_multipart()
         # return
         # while True:

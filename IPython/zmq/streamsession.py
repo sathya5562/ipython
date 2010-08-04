@@ -141,8 +141,9 @@ def rekey(dikt):
                 del dikt[k]
     return dikt
 
-def serialize_object(obj, threshold=1e-3):
+def serialize_object(obj, threshold=64e-6):
     """serialize an object into a list of sendable buffers"""
+    # threshold is 100 B
     databuffers = []
     if isinstance(obj, (list, tuple)):
         clist = canSequence(obj)
@@ -191,7 +192,7 @@ def unserialize_object(bufs):
             sobj.data = bufs.pop(0)
         return uncan(unserialize(sobj))
 
-def pack_apply_message(f, args, kwargs, threshold=1e-3):
+def pack_apply_message(f, args, kwargs, threshold=64e-6):
     """pack up a function, args, and kwargs to be sent over the wire
     as a series of buffers. Any object whose data is larger than `threshold`
     will not have their data copied (currently only numpy arrays support zero-copy)"""
@@ -206,10 +207,13 @@ def pack_apply_message(f, args, kwargs, threshold=1e-3):
     msg.extend(databuffers)
     return msg
 
-def unpack_apply_message(bufs, g=None):
+def unpack_apply_message(bufs, g=None, copy=True):
     """unpack f,args,kwargs from buffers packed by pack_apply_message()"""
     bufs = list(bufs) # allow us to pop
     assert len(bufs) >= 3, "not enough buffers!"
+    if not copy:
+        for i in range(3):
+            bufs[i] = bufs[i].bytes
     cf = pickle.loads(bufs.pop(0))
     sargs = list(pickle.loads(bufs.pop(0)))
     skwargs = dict(pickle.loads(bufs.pop(0)))
@@ -217,7 +221,18 @@ def unpack_apply_message(bufs, g=None):
     f = cf.getFunction(g)
     for sa in sargs:
         if sa.data is None:
-            sa.data = bufs.pop(0)
+            m = bufs.pop(0)
+            if sa.getTypeDescriptor() in ('buffer', 'ndarray'):
+                if copy:
+                    sa.data = buffer(m)
+                else:
+                    sa.data = m.buffer
+            else:
+                if copy:
+                    sa.data = m
+                else:
+                    sa.data = m.bytes
+    
     args = uncanSequence(map(unserialize, sargs), g)
     kwargs = {}
     for k in sorted(skwargs.iterkeys()):
@@ -303,7 +318,7 @@ class StreamSession(object):
         omsg = Message(msg)
         return omsg
 
-    def recv(self, socket, mode=zmq.NOBLOCK, content=True):
+    def recv(self, socket, mode=zmq.NOBLOCK, content=True, copy=True):
         """receives and unpacks a message
         returns [idents], msg"""
         if isinstance(socket, ZMQStream):
@@ -320,34 +335,43 @@ class StreamSession(object):
         # return an actual Message object
         # determine the number of idents by tryig to unpack them.
         # this is terrible:
-        idents, msg = self.feed_identities(msg)
+        idents, msg = self.feed_identities(msg, copy)
         try:
-            return idents, self.unpack_message(msg, content)
+            return idents, self.unpack_message(msg, content=content, copy=copy)
         except Exception, e:
             print idents, msg
             # TODO: handle it
             raise e
     
-    def feed_identities(self, msg):
+    def feed_identities(self, msg, copy=True):
         """This is a completely horrible thing, but it strips the zmq
         ident prefixes off of a message. It will break if any identities
-        are unpackable"""
+        are unpackable by self.unpack."""
+        msg = list(msg)
         idents = []
         while len(msg) > 3:
+            if copy:
+                s = msg[0]
+            else:
+                s = msg[0].bytes
             try:
-                s = self.unpack(msg[0])
+                _ = self.unpack(s)
             except:
-                idents.append(msg.pop(0))
+                idents.append(s)
+                msg.pop(0)
             else:
                 break
                 
         return idents, msg
     
-    def unpack_message(self, msg, content=True):
+    def unpack_message(self, msg, content=True, copy=True):
         """return a message object from the format
         sent by self.send"""
         assert len(msg) >= 3, "malformed message"
         message = {}
+        if not copy:
+            for i in range(3):
+                msg[i] = msg[i].bytes
         message['header'] = self.unpack(msg[0])
         message['msg_type'] = message['header']['msg_type']
         message['parent_header'] = self.unpack(msg[1])
@@ -355,9 +379,18 @@ class StreamSession(object):
             message['content'] = self.unpack(msg[2])
         else:
             message['content'] = msg[2]
+    
+        # message['buffers'] = msg[3:]
+        # else:
+        #     message['header'] = self.unpack(msg[0].bytes)
+        #     message['msg_type'] = message['header']['msg_type']
+        #     message['parent_header'] = self.unpack(msg[1].bytes)
+        #     if content:
+        #         message['content'] = self.unpack(msg[2].bytes)
+        #     else:
+        #         message['content'] = msg[2].bytes
         
-        message['buffers'] = msg[3:]
-        
+        message['buffers'] = msg[3:]# [ m.buffer for m in msg[3:] ]
         return message
             
         

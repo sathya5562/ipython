@@ -25,7 +25,6 @@ import cPickle as pickle
 # from zope.interface import Interface, implements
 
 try:
-    raise ImportError
     import numpy
 except ImportError:
     pass

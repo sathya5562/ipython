@@ -250,7 +250,8 @@ class Kernel(object):
                 working = dict()
                 suffix = prefix = ""
             f,args,kwargs = unpack_apply_message(bufs, working, copy=False)
-            fname = prefix+f.func_name+suffix
+            # if f.fun
+            fname = prefix+f.func_name.strip('<>')+suffix
             argname = prefix+"args"+suffix
             kwargname = prefix+"kwargs"+suffix
             resultname = prefix+"result"+suffix

@@ -68,6 +68,17 @@ def wrap_exception():
     }
     return exc_content
 
+class KernelError(Exception):
+    pass
+
+def unwrap_exception(content):
+    err = KernelError(content['etype'], content['evalue'])
+    err.evalue = content['evalue']
+    err.etype = content['etype']
+    err.traceback = ''.join(content['traceback'])
+    return err
+    
+
 class Message(object):
     """A simple message object that maps dict keys to attributes.
 

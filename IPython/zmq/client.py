@@ -13,13 +13,23 @@ except:
 
 import streamsession as ss
 import zmq
+from remotenamespace import RemoteNamespace
 
 def _push(ns):
     globals().update(ns)
 
 def _pull(keys):
     g = globals()
-    return map(g.get, keys)
+    if isinstance(keys, (list,tuple)):
+        return map(g.get, keys)
+    else:
+        return g.get(keys)
+
+def _clear():
+    globals().clear()
+
+def execute(code):
+    exec code
 
 # decorators for methods:
 @decorator
@@ -201,7 +211,7 @@ class Client(object):
             print "got unknown result: %s"%msg_id
         else:
             self.outstanding.remove(msg_id)
-        self.results[msg_id] = msg['content']
+        self.results[msg_id] = ss.unwrap_exception(msg['content'])
     
     def _handle_apply_reply(self, msg):
         # print msg
@@ -216,7 +226,8 @@ class Client(object):
         if content['status'] == 'ok':
             self.results[msg_id] = ss.unserialize_object(msg['buffers'])
         else:
-            self.results[msg_id] = content
+            
+            self.results[msg_id] = ss.unwrap_exception(content)
     
     def _flush_notifications(self):
         "flush incoming notifications of engine registrations"
@@ -243,6 +254,25 @@ class Client(object):
             else:
                 handler(msg)
             msg = self.session.recv(sock, mode=zmq.NOBLOCK)
+    
+    ###### get/setitem ########
+    
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            if key not in self.ids:
+                raise IndexError("No such engine: %i"%key)
+            return RemoteNamespace(self, key)
+        
+        if isinstance(key, slice):
+            indices = range(len(self.ids))[key]
+            ids = sorted(self._ids)
+            key = [ ids[i] for i in indices ]
+            # newkeys = sorted(self._ids)[thekeys[k]]
+        
+        if isinstance(key, (tuple, list, xrange)):
+            return [ self[k] for k in key ]
+        else:
+            raise TypeError("key by int/list of ints only, not %s"%(type(key)))
     
     ############ begin real methods #############
     
@@ -296,6 +326,13 @@ class Client(object):
         block : bool
                 whether or not to wait until done
         """
+        block = self.block if block is None else block
+        saveblock = self.block
+        self.block = block
+        result = self._apply_to(True, targets, execute, code)
+        self.block = saveblock
+        return result
+        
         queues,targets = self._build_targets(targets)
         
         block = self.block if block is None else block
@@ -320,8 +357,14 @@ class Client(object):
         
     def run(self, code, block=None):
         """runs code on an engine"""
-        a = time.time()
         block = self.block if block is None else block
+        saveblock = self.block
+        self.block = block
+        result = self._apply(False, execute, code)
+        self.block = saveblock
+        return result
+        
+        a = time.time()
         content = dict(code=code)
         b = time.time()
         msg = self.session.send(self.task_socket, 'execute_request', 
@@ -376,7 +419,7 @@ class Client(object):
         """
         return self._apply(True, f, *args, **kwargs)
     
-    def apply_to(self, targets, f, *args, **kwargs):
+    def _apply_to(self, bound, targets, f, *args, **kwargs):
         """calls f(*args, **kwargs) on a specific engine.
         
         if self.block is False:
@@ -385,37 +428,76 @@ class Client(object):
             returns actual result of f(*args, **kwargs)
         """
         queues,targets = self._build_targets(targets)
-        assert len(queues) == 1
-        queue = queues[0]
         bufs = ss.pack_apply_message(f,args,kwargs)
-        content = dict(bound=True)
-        msg = self.session.send(self.queue_socket, "apply_request", 
-                content=content, buffers=bufs,ident=queue)
-        msg_id = msg['msg_id']
-        self.outstanding.add(msg_id)
-        self.history.append(msg_id)
+        content = dict(bound=bound)
+        msg_ids = []
+        for queue in queues:
+            msg = self.session.send(self.queue_socket, "apply_request", 
+                    content=content, buffers=bufs,ident=queue)
+            msg_id = msg['msg_id']
+            self.outstanding.add(msg_id)
+            self.history.append(msg_id)
+            msg_ids.append(msg_id)
         if self.block:
-            self.barrier(msg_id)
-            return self.results[msg_id]
+            self.barrier(msg_ids)
         else:
-            return msg_id
+            if len(msg_ids) == 1:
+                return msg_ids[0]
+            else:
+                return msg_ids
+        if len(msg_ids) == 1:
+            return self.results[msg_ids[0]]
+        else:
+            result = {}
+            for target,mid in zip(targets, msg_ids):
+                    result[target] = self.results[mid]
+            return result
+    
+    def apply_to(self, targets, f, *args, **kwargs):
+        """calls f(*args, **kwargs) on a specific engine.
+        
+        if self.block is False:
+            returns msg_id
+        else:
+            returns actual result of f(*args, **kwargs)
+        
+        The target's namespace is not used here.
+        Use apply_bound_to() to access target's globals.
+        """
+        return self._apply_to(False, targets, f, *args, **kwargs)
+    
+    def apply_bound_to(self, targets, f, *args, **kwargs):
+        """calls f(*args, **kwargs) on a specific engine.
+        
+        if self.block is False:
+            returns msg_id
+        else:
+            returns actual result of f(*args, **kwargs)
+        
+        This method has access to the target's globals
+        
+        """
+        return self._apply_to(True, targets, f, *args, **kwargs)
     
     def push(self, target, ns, block=None):
         """push the contents of `ns` into the namespace on `target`"""
+        if not isinstance(ns, dict):
+            raise TypeError("Must be a dict, not %s"%type(ns))
         block = self.block if block is None else block
         saveblock = self.block
         self.block = block
-        result = self.apply_to(target, _push, ns)
+        result = self.apply_bound_to(target, _push, ns)
         self.block = saveblock
         return result
     
     @spinfirst
     def pull(self, target, keys, block=True):
         """pull objects from `target`'s namespace by `keys`"""
+        
         block = self.block if block is None else block
         saveblock = self.block
         self.block = block
-        result = self.apply_to(target, _pull, keys)
+        result = self.apply_bound_to(target, _pull, keys)
         self.block = saveblock
         return result
     

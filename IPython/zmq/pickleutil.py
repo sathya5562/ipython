@@ -1,6 +1,6 @@
 # encoding: utf-8
 
-"""Pickle related utilities."""
+"""Pickle related utilities. Perhaps this should be called 'can'."""
 
 __docformat__ = "restructuredtext en"
 
@@ -17,6 +17,7 @@ __docformat__ = "restructuredtext en"
 
 from types import FunctionType
 
+# contents of codeutil should either be in here, or codeutil belongs in IPython/util
 from IPython.kernel import codeutil
 
 class CannedObject(object):

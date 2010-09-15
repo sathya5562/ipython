@@ -6,13 +6,11 @@ import threading
 
 from functools import wraps
 
-try:
-    from decorator import decorator
-except:
-    decorator = lambda f: f
+from IPython.external.decorator import decorator
 
 import streamsession as ss
 import zmq
+
 from remotenamespace import RemoteNamespace
 
 def _push(ns):
@@ -29,24 +27,32 @@ def _clear():
     globals().clear()
 
 def execute(code):
-    exec code
+    exec code in globals()
 
 # decorators for methods:
 @decorator
-def spinfirst(f):
-    @wraps(f)
-    def spun_method(self, *args, **kwargs):
-        self.spin()
-        return f(self, *args, **kwargs)
-    return spun_method
+def spinfirst(f,self,*args,**kwargs):
+    self.spin()
+    return f(self, *args, **kwargs)
 
 @decorator
-def checktargets(f):
-    @wraps(f)
-    def checked_method(self, *args, **kwargs):
-        self._build_targets(kwargs['targets'])
-        return f(self, *args, **kwargs)
-    return checked_method
+def defaultblock(f, self, *args, **kwargs):
+    block = kwargs.get('block',None)
+    block = self.block if block is None else block
+    saveblock = self.block
+    self.block = block
+    ret = f(self, *args, **kwargs)
+    self.block = saveblock
+    return ret
+
+
+# @decorator
+# def checktargets(f):
+#     @wraps(f)
+#     def checked_method(self, *args, **kwargs):
+#         self._build_targets(kwargs['targets'])
+#         return f(self, *args, **kwargs)
+#     return checked_method
 
 
 # class _ZMQEventLoopThread(threading.Thread):
@@ -300,7 +306,7 @@ class Client(object):
         """
         targets = self._build_targets(targets)[1]
         content = dict(targets=targets)
-        self.session.send(self.controller_socket, "queue_status", content=content)
+        self.session.send(self.controller_socket, "queue_request", content=content)
         idents,msg = self.session.recv(self.controller_socket, 0)
         return msg['content']
         
@@ -312,7 +318,7 @@ class Client(object):
     def abort(self, targets=None):
         pass
     
-    # @spinfirst
+    @defaultblock
     def execute(self, code, targets=None, block=None):
         """executes `code` on `targets` in blocking or nonblocking manner.
         
@@ -326,35 +332,13 @@ class Client(object):
         block : bool
                 whether or not to wait until done
         """
-        block = self.block if block is None else block
-        saveblock = self.block
-        self.block = block
+        # block = self.block if block is None else block
+        # saveblock = self.block
+        # self.block = block
         result = self._apply_to(True, targets, execute, code)
-        self.block = saveblock
+        # self.block = saveblock
         return result
-        
-        queues,targets = self._build_targets(targets)
-        
-        block = self.block if block is None else block
-        msg_ids = []
-        content = dict(code=code)
-        for q in queues:
-            msg = self.session.send(self.queue_socket, 'execute_request', 
-                    content=content, ident=q)
-            msg_id = msg['msg_id']
-            msg_ids.append(msg_id)
-            self.outstanding.add(msg_id)
-            self.history.append(msg_id)
-        if block:
-            self.barrier(msg_ids)
-            result = {}
-            for target,mid in zip(targets, msg_ids):
-                    result[target] = self.results[mid]
-
-            return result
-        else:
-            return msg_ids
-        
+    
     def run(self, code, block=None):
         """runs code on an engine"""
         block = self.block if block is None else block
@@ -530,11 +514,12 @@ class Client(object):
                 if isinstance(msg_id, int):
                     msg_id = self.history[msg_id]
                 theids.add(msg_id)
+        self.spin()
         while theids.intersection(self.outstanding):
-            self.spin()
             if timeout >= 0 and ( time.time()-tic ) > timeout:
                 break
-            time.sleep(0)
+            time.sleep(1e-3)
+            self.spin()
         return len(theids.intersection(self.outstanding)) == 0
     
     @spinfirst

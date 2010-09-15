@@ -133,8 +133,7 @@ content = {
 }
 
 # msg_type = 'connection_request'
-content = {
-}
+content = {}
 
 # msg_type = 'connection_reply'
 content = {
@@ -145,23 +144,6 @@ content = {
     controller : 'tcp...' # addr for controller methods, like queue_status, etc.
     # if error:
     reason : 'queue_id already registered' # str failure message
-}
-
-# msg_type = 'result_request'
-content = {
-    msg_id : uuid # str
-}
-
-# msg_type = '
-
-# msg_type = 'result_reply'
-content = {
-    status : 'ok' # else error
-    # if ok:
-    'a-b-c-d' : msg # the content dict is keyed by msg_ids,
-    ...             # values are the result messages
-    # if error:
-    reason : "explanation"
 }
 
 Controller PUB
@@ -201,7 +183,7 @@ Controller Messages
 
 # msg_type = 'queue_status'
 content = {
-    'verbose' : True # whether return should be lists or lens
+    'verbose' : True # (bool): whether return should be lists themselves or lens of lists
     'targets' : list of ints
 }
 # msg_type = 'queue_status'
@@ -209,6 +191,21 @@ content = {
     '0' : {'completed' : 1, 'queue' : 7}
 }
 # a dict
+
+# msg_type = 'result_request'
+content = {
+    msg_id : uuid # str
+}
+
+# msg_type = 'result_reply'
+content = {
+    status : 'ok' # else error
+    # if ok:
+    'a-b-c-d' : msg # the content dict is keyed by msg_ids,
+    ...             # values are the result messages
+    # if error:
+    reason : "explanation"
+}
 
 
 

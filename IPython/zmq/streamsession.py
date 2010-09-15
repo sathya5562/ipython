@@ -110,12 +110,13 @@ class Message(object):
 
 
 def msg_header(msg_id, msg_type, username, session):
-    return {
-        'msg_id' : msg_id,
-        'msg_type': msg_type,
-        'username' : username,
-        'session' : session
-    }
+    return locals()
+    # return {
+    #     'msg_id' : msg_id,
+    #     'msg_type': msg_type,
+    #     'username' : username,
+    #     'session' : session
+    # }
 
 
 def extract_header(msg_or_header):
@@ -139,21 +140,32 @@ def extract_header(msg_or_header):
 
 def rekey(dikt):
     """rekey a dict that has been forced to use str keys where there should be
-    ints by json"""
-    for k,v in dikt.iteritems():
+    ints by json.  This belongs in the jsonutil added by fperez."""
+    for k in dikt.iterkeys():
         if isinstance(k, str):
+            ik=fk=None
             try:
                 ik = int(k)
-                
             except ValueError:
-                continue
+                try:
+                    fk = float(k)
+                except ValueError:
+                    continue
+            if ik is not None:
+                nk = ik
             else:
-                dikt[ik] = v
-                del dikt[k]
+                nk = fk
+            if nk in dikt:
+                raise KeyError("already have key %r"%nk)
+            dikt[nk] = dikt.pop(k)
     return dikt
 
 def serialize_object(obj, threshold=64e-6):
-    """serialize an object into a list of sendable buffers"""
+    """serialize an object into a list of sendable buffers.
+    
+    Returns: (pmd, bufs)
+        where pmd is the pickled metadata wrapper, and bufs
+        is a list of data buffers"""
     # threshold is 100 B
     databuffers = []
     if isinstance(obj, (list, tuple)):
@@ -178,11 +190,11 @@ def serialize_object(obj, threshold=64e-6):
         if s.getDataSize() > threshold:
             databuffers.append(s.getData())
             s.data = None
-        return pickle.dumps(serialize(can(obj)),-1),databuffers
+        return pickle.dumps(s,-1),databuffers
             
         
 def unserialize_object(bufs):
-    """reconstruct an object serialized by serialize_object"""
+    """reconstruct an object serialized by serialize_object from data buffers"""
     bufs = list(bufs)
     sobj = pickle.loads(bufs.pop(0))
     if isinstance(sobj, (list, tuple)):
@@ -219,7 +231,8 @@ def pack_apply_message(f, args, kwargs, threshold=64e-6):
     return msg
 
 def unpack_apply_message(bufs, g=None, copy=True):
-    """unpack f,args,kwargs from buffers packed by pack_apply_message()"""
+    """unpack f,args,kwargs from buffers packed by pack_apply_message()
+    Returns: original f,args,kwargs"""
     bufs = list(bufs) # allow us to pop
     assert len(bufs) >= 3, "not enough buffers!"
     if not copy:
@@ -255,9 +268,11 @@ def unpack_apply_message(bufs, g=None, copy=True):
     return f,args,kwargs
 
 class StreamSession(object):
-    """tweaked version of IPython.zmq.session.session, for use with pyzmq ZMQStreams"""
+    """tweaked version of IPython.zmq.session.Session, for development in Parallel"""
 
-    def __init__(self, username=os.environ.get('USER','username'), session=None, packer=None,unpacker=None):
+    def __init__(self, username=None, session=None, packer=None, unpacker=None):
+        if username is None:
+            username = os.environ.get('USER','username')
         self.username = username
         if session is None:
             self.session = str(uuid.uuid4())
@@ -267,11 +282,15 @@ class StreamSession(object):
         if packer is None:
             self.pack = default_packer
         else:
+            if not callable(packer):
+                raise TypeError("packer must be callable, not %s"%type(packer))
             self.pack = packer
         
         if unpacker is None:
             self.unpack = default_unpacker
         else:
+            if not callable(unpacker):
+                raise TypeError("unpacker must be callable, not %s"%type(unpacker))
             self.unpack = unpacker
         
         self.none = self.pack({})
@@ -377,8 +396,21 @@ class StreamSession(object):
     
     def unpack_message(self, msg, content=True, copy=True):
         """return a message object from the format
-        sent by self.send"""
-        assert len(msg) >= 3, "malformed message"
+        sent by self.send.
+        
+        parameters:
+        
+        content : bool (True)
+            whether to unpack the content dict (True), 
+            or leave it serialized (False)
+        
+        copy : bool (True)
+            whether to return the bytes (True), 
+            or the non-copying Message object in each place (False)
+        
+        """
+        if not len(msg) >= 3:
+            raise TypeError("malformed message, must have at least 3 elements")
         message = {}
         if not copy:
             for i in range(3):

@@ -148,8 +148,8 @@ class Controller(object):
         if self.db is not None:
             self.db.on_recv(self.dispatch_db)
             
-        self.client_handlers = {'queue_status': self.queue_status,
-                                'result_request': self.get_result,
+        self.client_handlers = {'queue_request': self.queue_status,
+                                'result_request': self.get_results,
                                 'purge_request': self.purge_results
                                 }
         
@@ -231,10 +231,12 @@ class Controller(object):
         """"""
         logger.debug("registration::dispatch_register_request(%s)"%msg)
         idents,msg = self.session.feed_identities(msg)
+        print idents,msg, len(msg)
         try:
             msg = self.session.unpack_message(msg,content=True)
-        except:
+        except Exception, e:
             logger.error("registration::got bad registration message: %s"%msg)
+            raise e
             return
         
         msg_type = msg['msg_type']
@@ -264,7 +266,7 @@ class Controller(object):
         
     
     def dispatch_client_msg(self, msg):
-        """"""
+        """Route messages from clients"""
         idents, msg = self.session.feed_identities(msg)
         client_id = idents[0]
         try:
@@ -568,19 +570,51 @@ class Controller(object):
     
     def purge_results(self, client_id, msg):
         content = msg['content']
-        msg_ids = content['msg_ids']
+        msg_ids = content.get('msg_ids', [])
+        reply = dict(status='ok')
         if msg_ids == 'all':
-            pass
+            self.results = {}
+        else:
+            for msg_id in msg_ids:
+                if msg_id in self.results:
+                    self.results.pop(msg_id)
+                else:
+                    if msg_id in self.pending:
+                        reply = dict(status='error', reason="msg pending: %r"%msg_id)
+                    else:
+                        reply = dict(status='error', reason="No such msg: %r"%msg_id)
+                    break
+            eids = content.get('engine_ids', [])
+            for eid in eids:
+                if eid not in self.engines:
+                    reply = dict(status='error', reason="No such engine: %i"%eid)
+                    break
+                msg_ids = self.completed.pop(eid)
+                for msg_id in msg_ids:
+                    self.results.pop(msg_id)
+        
+        self.sesison.send(self.clientele, 'purge_reply', content=reply, ident=client_id)
+                
+                
+        
         # if content['']
     
-    def get_result(self, client_id, msg):
-        """get the result of a single message"""
+    def get_results(self, client_id, msg):
+        """get the result of 1 or more messages"""
         content = msg['content']
-        msg_id = msg['msg_id']
-        if msg_id in self.pending:
-            content = dict(status='pending')
-        elif msg_id in self.results:
-            content = self.results[msg_id]['content']
+        msg_ids = set(msg['msg_ids'])
+        pending = []
+        content['pending'] = pending
+        content = dict(status='ok')
+        for msg_id in msg_ids:
+            if msg_id in self.pending:
+                pending.append(msg_id)
+            elif msg_id in self.results:
+                content[msg_id] = self.results[msg_id]['content']
+            else:
+                content = dict(status='error')
+                content['reason'] = 'no such message: '+msg_id
+                break
         self.session.send(self.clientele, "result_reply", content=content, parent=msg, ident=client_id)
     
 

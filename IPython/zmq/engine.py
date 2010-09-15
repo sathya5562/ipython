@@ -64,7 +64,7 @@ class Engine(object):
             task_addr = msg.content.task
             print task_addr
             if task_addr:
-                task = self.context.socket(zmq.XREP)
+                task = self.context.socket(zmq.PAIR)
                 task.connect(str(task_addr))
                 self.task_queue = zmqstream.ZMQStream(task, self.loop)
             
@@ -106,7 +106,7 @@ if __name__ == '__main__':
     print reg_conn
     print >>sys.__stdout__, "Starting the engine..."
     
-    reg = ctx.socket(zmq.XREQ)
+    reg = ctx.socket(zmq.PAIR)
     reg.connect(reg_conn)
     reg = zmqstream.ZMQStream(reg, loop)
     if len(sys.argv) > 1:

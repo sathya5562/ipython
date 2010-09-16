@@ -3,6 +3,7 @@
 
 import time
 import logging
+from multiprocessing import Process
 
 import zmq
 from zmq.device import monitoredqueue as mq
@@ -11,6 +12,26 @@ from zmq.eventloop.zmqstream import ZMQStream
 from zmq.log import handlers
 
 from IPython.zmq import controller, log, streamsession as session, heartbeat
+
+def task_queue(iface, etport, ctport, monport):
+    """start up the task queue"""
+    q = mq.TSMonitoredQueue(zmq.XREP, zmq.XREQ, zmq.PUB, 'in', 'out')
+    q.bind_in("%s:%i"%(iface, ctport))
+    q.bind_out("%s:%i"%(iface, etport))
+    q.connect_mon("%s:%i"%(iface, monport))
+    q.start()
+    q.join()
+
+def me_queue(iface, eqport, cqport, monport):
+    """start up the ME queue, for use in multiprocessing.Process"""
+    q = mq.TSMonitoredQueue(zmq.XREP, zmq.XREP, zmq.PUB, 'in', 'out')
+    q.bind_in("%s:%i"%(iface, cqport))
+    q.bind_out("%s:%i"%(iface, eqport))
+    q.connect_mon("%s:%i"%(iface, monport))
+    q.start()
+    q.join()
+  
+  
 
 def setup():
     """setup a basic controller and open client,registrar, and logging ports. Start the Queue and the heartbeat"""
@@ -43,7 +64,7 @@ def setup():
     #         connected=True
     #         
     handler = handlers.PUBHandler(lsock)
-    handler.setLevel(logging.INFO)
+    handler.setLevel(logging.DEBUG)
     handler.root_topic = "controller"
     log.logger.addHandler(handler)
     time.sleep(.5)
@@ -60,7 +81,7 @@ def setup():
     hrep = ctx.socket(zmq.XREP)
     hrep.bind("%s:%i"%(iface, hport+1))
     
-    hb = heartbeat.HeartBeater(loop, ZMQStream(hpub,loop), ZMQStream(hrep,loop), 500)
+    hb = heartbeat.HeartBeater(loop, ZMQStream(hpub,loop), ZMQStream(hrep,loop), 1000)
     hb.start()
     
     ### Client connections ###
@@ -82,17 +103,14 @@ def setup():
     sub = ZMQStream(sub, loop)
     
     # Multiplexer Queue
-    q = mq.TSMonitoredQueue(zmq.XREP, zmq.XREP, zmq.PUB, 'in', 'out')
-    q.bind_in("%s:%i"%(iface, cqport))
-    q.bind_out("%s:%i"%(iface, eqport))
-    q.connect_mon("%s:%i"%(iface, monport))
-    q.start()
+    mq = Process(target=me_queue, args=(iface, eqport, cqport, monport))
+    mq.daemon=True
+    mq.start()
     # Task Queue
-    q = mq.TSMonitoredQueue(zmq.XREP, zmq.XREQ, zmq.PUB, 'intask', 'outtask')
-    q.bind_in("%s:%i"%(iface, ctport))
-    q.bind_out("%s:%i"%(iface, etport))
-    q.connect_mon("%s:%i"%(iface, monport))
-    q.start()
+    tq = Process(target=task_queue, args=(iface, etport, ctport, monport))
+    tq.daemon=True
+    tq.start()
+    
     time.sleep(.25)
     
     # build connection dicts

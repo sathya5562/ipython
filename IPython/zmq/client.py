@@ -12,6 +12,7 @@ import streamsession as ss
 import zmq
 
 from remotenamespace import RemoteNamespace
+from view import DirectView
 
 def _push(ns):
     globals().update(ns)
@@ -155,8 +156,13 @@ class Client(object):
             self._ids.add(eid)
     
     def _build_targets(self, targets):
-        if targets is None or targets == 'all':
+        if targets is None:
             targets = self._ids
+        elif isinstance(targets, str):
+            if targets.lower() == 'all':
+                targets = self._ids
+            else:
+                raise TypeError("%r not valid str target, must be 'all'"%(targets))
         elif isinstance(targets, int):
             targets = [targets]
         return [self._engines[t] for t in targets], list(targets)
@@ -267,7 +273,7 @@ class Client(object):
         if isinstance(key, int):
             if key not in self.ids:
                 raise IndexError("No such engine: %i"%key)
-            return RemoteNamespace(self, key)
+            return DirectView(self, key)
         
         if isinstance(key, slice):
             indices = range(len(self.ids))[key]
@@ -276,9 +282,10 @@ class Client(object):
             # newkeys = sorted(self._ids)[thekeys[k]]
         
         if isinstance(key, (tuple, list, xrange)):
-            return [ self[k] for k in key ]
+            _,targets = self._build_targets(list(key))
+            return DirectView(self, targets)
         else:
-            raise TypeError("key by int/list of ints only, not %s"%(type(key)))
+            raise TypeError("key by int/iterable of ints only, not %s"%(type(key)))
     
     ############ begin real methods #############
     
@@ -312,14 +319,16 @@ class Client(object):
         
     @spinfirst
     def clear(self, targets=None):
+        """clear the namespace in target(s)"""
         pass
     
     @spinfirst
     def abort(self, targets=None):
+        """abort the Queues of target(s)"""
         pass
     
     @defaultblock
-    def execute(self, code, targets=None, block=None):
+    def execute(self, code, targets='all', block=None):
         """executes `code` on `targets` in blocking or nonblocking manner.
         
         Parameters
@@ -335,37 +344,47 @@ class Client(object):
         # block = self.block if block is None else block
         # saveblock = self.block
         # self.block = block
-        result = self._apply_to(True, targets, execute, code)
+        result = self.apply(execute, (code,), targets=targets, block=block, bound=True)
         # self.block = saveblock
         return result
     
     def run(self, code, block=None):
-        """runs code on an engine"""
-        block = self.block if block is None else block
-        saveblock = self.block
-        self.block = block
-        result = self._apply(False, execute, code)
-        self.block = saveblock
+        """runs `code` on an engine. 
+        
+        Calls to this are load-balanced.
+        
+        Parameters
+        ----------
+        code : str
+                the code string to be executed
+        block : bool
+                whether or not to wait until done
+        
+        """
+        result = self.apply(execute, (code,), targets=None, block=block, bound=False)
         return result
         
-        a = time.time()
-        content = dict(code=code)
-        b = time.time()
-        msg = self.session.send(self.task_socket, 'execute_request', 
-                content=content)
-        c = time.time()
-        msg_id = msg['msg_id']
-        self.outstanding.add(msg_id)
-        self.history.append(msg_id)
-        d = time.time()
-        if block:
-            self.barrier(msg_id)
-            return self.results[msg_id]
-        else:
-            return msg_id
+        # a = time.time()
+        # content = dict(code=code)
+        # b = time.time()
+        # msg = self.session.send(self.task_socket, 'execute_request', 
+        #         content=content)
+        # c = time.time()
+        # msg_id = msg['msg_id']
+        # self.outstanding.add(msg_id)
+        # self.history.append(msg_id)
+        # d = time.time()
+        # if block:
+        #     self.barrier(msg_id)
+        #     return self.results[msg_id]
+        # else:
+        #     return msg_id
     
-    def _apply(self, bound, f, *args, **kwargs):
-        """the underlying method called by apply() and apply_bound()"""
+    def _apply_balanced(self, f, args, kwargs, bound=True, block=None):
+        """the underlying method for applying functions in a load balanced
+        manner."""
+        block = block if block is not None else self.block
+        
         bufs = ss.pack_apply_message(f,args,kwargs)
         content = dict(bound=bound)
         msg = self.session.send(self.task_socket, "apply_request", 
@@ -373,45 +392,17 @@ class Client(object):
         msg_id = msg['msg_id']
         self.outstanding.add(msg_id)
         self.history.append(msg_id)
-        if self.block:
+        if block:
             self.barrier(msg_id)
             return self.results[msg_id]
         else:
             return msg_id
     
-    def apply(self, f, *args, **kwargs):
-        """calls f(*args, **kwargs) on a remote engine, returning the result.
-        
-        This method does not involve the engine's namespace.
-        
-        if self.block is False:
-            returns msg_id
-        else:
-            returns actual result of f(*args, **kwargs)
-        """
-        return self._apply(False, f, *args, **kwargs)
-    
-    def apply_bound(self, f, *args, **kwargs):
-        """calls f(*args, **kwargs) on a remote engine. This does get
-        executed in an engine's namespace. The controller selects the 
-        target engine via 0MQ XREQ load balancing.
-        
-        if self.block is False:
-            returns msg_id
-        else:
-            returns actual result of f(*args, **kwargs)
-        """
-        return self._apply(True, f, *args, **kwargs)
-    
-    def _apply_to(self, bound, targets, f, *args, **kwargs):
-        """calls f(*args, **kwargs) on a specific engine.
-        
-        if self.block is False:
-            returns msg_id
-        else:
-            returns actual result of f(*args, **kwargs)
-        """
+    def _apply_direct(self, f, args, kwargs, bound=True, block=None, targets=None):
+        """Then underlying method for applying functions to specific engines."""
+        block = block if block is not None else self.block
         queues,targets = self._build_targets(targets)
+        
         bufs = ss.pack_apply_message(f,args,kwargs)
         content = dict(bound=bound)
         msg_ids = []
@@ -422,7 +413,7 @@ class Client(object):
             self.outstanding.add(msg_id)
             self.history.append(msg_id)
             msg_ids.append(msg_id)
-        if self.block:
+        if block:
             self.barrier(msg_ids)
         else:
             if len(msg_ids) == 1:
@@ -437,52 +428,73 @@ class Client(object):
                     result[target] = self.results[mid]
             return result
     
-    def apply_to(self, targets, f, *args, **kwargs):
-        """calls f(*args, **kwargs) on a specific engine.
+    def apply(self, f, args=None, kwargs=None, bound=True, block=None, targets=None):
+        """calls f(*args, **kwargs) on a remote engine(s), returning the result.
         
         if self.block is False:
-            returns msg_id
+            returns msg_id or list of msg_ids
         else:
             returns actual result of f(*args, **kwargs)
-        
-        The target's namespace is not used here.
-        Use apply_bound_to() to access target's globals.
         """
-        return self._apply_to(False, targets, f, *args, **kwargs)
-    
-    def apply_bound_to(self, targets, f, *args, **kwargs):
-        """calls f(*args, **kwargs) on a specific engine.
-        
-        if self.block is False:
-            returns msg_id
+        args = args if args is not None else []
+        kwargs = kwargs if kwargs is not None else {}
+        if targets is None:
+            return self._apply_balanced(f,args,kwargs,bound=bound, block=block)
         else:
-            returns actual result of f(*args, **kwargs)
-        
-        This method has access to the target's globals
-        
-        """
-        return self._apply_to(True, targets, f, *args, **kwargs)
+            return self._apply_direct(f, args, kwargs,
+                        bound=bound,block=block, targets=targets)
     
-    def push(self, target, ns, block=None):
+    # def apply_bound(self, f, *args, **kwargs):
+    #     """calls f(*args, **kwargs) on a remote engine. This does get
+    #     executed in an engine's namespace. The controller selects the 
+    #     target engine via 0MQ XREQ load balancing.
+    #     
+    #     if self.block is False:
+    #         returns msg_id
+    #     else:
+    #         returns actual result of f(*args, **kwargs)
+    #     """
+    #     return self._apply(f, args, kwargs, bound=True)
+    # 
+    # 
+    # def apply_to(self, targets, f, *args, **kwargs):
+    #     """calls f(*args, **kwargs) on a specific engine.
+    #     
+    #     if self.block is False:
+    #         returns msg_id
+    #     else:
+    #         returns actual result of f(*args, **kwargs)
+    #     
+    #     The target's namespace is not used here.
+    #     Use apply_bound_to() to access target's globals.
+    #     """
+    #     return self._apply_to(False, targets, f, args, kwargs)
+    # 
+    # def apply_bound_to(self, targets, f, *args, **kwargs):
+    #     """calls f(*args, **kwargs) on a specific engine.
+    #     
+    #     if self.block is False:
+    #         returns msg_id
+    #     else:
+    #         returns actual result of f(*args, **kwargs)
+    #     
+    #     This method has access to the target's globals
+    #     
+    #     """
+    #     return self._apply_to(f, args, kwargs)
+    # 
+    def push(self, ns, targets=None, block=None):
         """push the contents of `ns` into the namespace on `target`"""
         if not isinstance(ns, dict):
             raise TypeError("Must be a dict, not %s"%type(ns))
-        block = self.block if block is None else block
-        saveblock = self.block
-        self.block = block
-        result = self.apply_bound_to(target, _push, ns)
-        self.block = saveblock
+        result = self.apply(_push, (ns,), targets=targets, block=block,bound=True)
         return result
     
     @spinfirst
-    def pull(self, target, keys, block=True):
+    def pull(self, keys, targets=None, block=True):
         """pull objects from `target`'s namespace by `keys`"""
         
-        block = self.block if block is None else block
-        saveblock = self.block
-        self.block = block
-        result = self.apply_bound_to(target, _pull, keys)
-        self.block = saveblock
+        result = self.apply(_pull, (keys,), targets=targets, block=block, bound=True)
         return result
     
     def barrier(self, msg_ids=None, timeout=-1):
@@ -530,7 +542,14 @@ class Client(object):
         
         content = dict(msg_id=msg_id)
         msg = self.session.send(self.controller_socket, "result_request", content=content)
-        idents,msg = self.session.recv(self.controller_socket, 0)
+        while True:
+            try:
+                idents,msg = self.session.recv(self.controller_socket, zmq.NOBLOCK)
+            except zmq.ZMQError:
+                time.sleep(1e-3)
+                continue
+            else:
+                break
         return msg
     
     

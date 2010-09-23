@@ -3,33 +3,14 @@
 
 import time
 import logging
-from multiprocessing import Process
 
 import zmq
-from zmq.device import monitoredqueue as mq
+from zmq.devices import ProcessMonitoredQueue, ThreadMonitoredQueue
 from zmq.eventloop import ioloop
 from zmq.eventloop.zmqstream import ZMQStream
 from zmq.log import handlers
 
 from IPython.zmq import controller, log, streamsession as session, heartbeat
-
-def task_queue(iface, etport, ctport, monport):
-    """start up the task queue"""
-    q = mq.TSMonitoredQueue(zmq.XREP, zmq.XREQ, zmq.PUB, 'in', 'out')
-    q.bind_in("%s:%i"%(iface, ctport))
-    q.bind_out("%s:%i"%(iface, etport))
-    q.connect_mon("%s:%i"%(iface, monport))
-    q.start()
-    q.join()
-
-def me_queue(iface, eqport, cqport, monport):
-    """start up the ME queue, for use in multiprocessing.Process"""
-    q = mq.TSMonitoredQueue(zmq.XREP, zmq.XREP, zmq.PUB, 'in', 'out')
-    q.bind_in("%s:%i"%(iface, cqport))
-    q.bind_out("%s:%i"%(iface, eqport))
-    q.connect_mon("%s:%i"%(iface, monport))
-    q.start()
-    q.join()
   
   
 
@@ -102,14 +83,21 @@ def setup():
     monport = sub.bind_to_random_port(iface)
     sub = ZMQStream(sub, loop)
     
-    # Multiplexer Queue
-    mq = Process(target=me_queue, args=(iface, eqport, cqport, monport))
-    mq.daemon=True
-    mq.start()
-    # Task Queue
-    tq = Process(target=task_queue, args=(iface, etport, ctport, monport))
-    tq.daemon=True
-    tq.start()
+    # Multiplexer Queue (in a Thread)
+    q = ThreadMonitoredQueue(zmq.XREP, zmq.XREP, zmq.PUB, 'in', 'out')
+    q.bind_in("%s:%i"%(iface, cqport))
+    q.bind_out("%s:%i"%(iface, eqport))
+    q.connect_mon("%s:%i"%(iface, monport))
+    q.daemon=True
+    q.start()
+    
+    # Task Queue (in a Process)
+    q = ProcessMonitoredQueue(zmq.XREP, zmq.XREQ, zmq.PUB, 'intask', 'outtask')
+    q.bind_in("%s:%i"%(iface, ctport))
+    q.bind_out("%s:%i"%(iface, etport))
+    q.connect_mon("%s:%i"%(iface, monport))
+    q.daemon=True
+    q.start()
     
     time.sleep(.25)
     

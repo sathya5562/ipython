@@ -64,7 +64,7 @@ class Controller(object):
     clientele: ZMQStream for client connections (XREP)
                 not used for jobs, only query/control commands
     queue: ZMQStream for monitoring the command queue (SUB)
-    heartbeat: HeartBeater object checking the pulse of the engines
+    heartbeat: HeartMonitor object checking the pulse of the engines
     db_stream: connection to db for out of memory logging of commands
                 NotImplemented
     queue_addr: zmq connection address of the XREP socket for the queue
@@ -103,7 +103,7 @@ class Controller(object):
         # engine:
         queue: ZMQStream for monitoring queue messages
         registrar: ZMQStream for engine registration
-        heartbeat: HeartBeater object for tracking engines
+        heartbeat: HeartMonitor object for tracking engines
         # client:
         clientele: ZMQStream for client connections
         # extra:

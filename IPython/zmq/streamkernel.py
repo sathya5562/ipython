@@ -128,7 +128,7 @@ class RawInput(object):
 
 class Kernel(object):
 
-    def __init__(self, session, reply_stream, pub_stream,task_stream=None):
+    def __init__(self, session, reply_stream, pub_stream, task_stream=None):
         self.session = session
         self.reply_stream = reply_stream
         self.task_stream = task_stream
@@ -310,30 +310,38 @@ class Kernel(object):
         #     raise e
     
     def start(self):
-        if self.reply_stream:
-            self.reply_stream.on_recv(lambda msg: 
-                    self.recv_queue(self.reply_stream, msg), copy=False)
-        if self.task_stream:
-            self.task_stream.on_recv(lambda msg: 
-                    self.recv_queue(self.task_stream, msg), copy=False)
-            # print self.task_stream.socket.recv_multipart()
-        # return
-        # while True:
-        #     ident = self.reply_socket.recv()
-        #     assert self.reply_socket.rcvmore(), "Unexpected missing message part."
-        #     msg = self.reply_socket.recv_json()
-        #     omsg = Message(msg)
-        #     print>>sys.__stdout__
-        #     print>>sys.__stdout__, omsg
-        #     handler = self.handlers.get(omsg.msg_type, None)
-        #     if handler is None:
-        #         print >> sys.__stderr__, "UNKNOWN MESSAGE TYPE:", omsg
-        #     else:
-        #         handler(ident, omsg)
+        #### stream mode:
+        # if self.reply_stream:
+        #     self.reply_stream.on_recv(lambda msg: 
+        #             self.recv_queue(self.reply_stream, msg), copy=False)
+        # if self.task_queue:
+        #     self.task_stream.on_recv(lambda msg: 
+        #             self.recv_queue(self.task_stream, msg), copy=False)
+        
+        #### while True mode:
+        while True:
+            idle = True
+            try:
+                msg = self.reply_stream.socket.recv_multipart(
+                            zmq.NOBLOCK, copy=False)
+            except zmq.ZMQError, e:
+                if e.errno != zmq.EAGAIN:
+                    raise e
+            else:
+                idle=False
+                self.recv_queue(self.reply_stream, msg)
+                    
+            if not self.task_stream.empty():
+                idle=False
+                msg = self.task_stream.recv_multipart()
+                self.recv_queue(self.task_stream, msg)
+            if idle:
+                # don't busywait
+                time.sleep(1e-3)
 
 
 def main():
-    raise Exception("WHODA")
+    raise Exception("Don't run me anymore")
     loop = ioloop.IOLoop.instance()
     c = zmq.Context()
 

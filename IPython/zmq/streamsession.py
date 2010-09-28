@@ -363,7 +363,7 @@ class StreamSession(object):
             else:
                 raise
         # return an actual Message object
-        # determine the number of idents by tryig to unpack them.
+        # determine the number of idents by trying to unpack them.
         # this is terrible:
         idents, msg = self.feed_identities(msg, copy)
         try:

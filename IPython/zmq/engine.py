@@ -14,6 +14,7 @@ from zmq.eventloop import ioloop, zmqstream
 from streamsession import Message, StreamSession
 import streamkernel as kernel
 import heartbeat
+import taskthread
 # from log import logger
 
 
@@ -64,16 +65,22 @@ class Engine(object):
             task_addr = msg.content.task
             print task_addr
             if task_addr:
-                task = self.context.socket(zmq.PAIR)
-                task.connect(str(task_addr))
-                self.task_queue = zmqstream.ZMQStream(task, self.loop)
+                task = taskthread.TaskThread(zmq.PAIR, zmq.PUB, self.queue_id)
+                # task = self.context.socket(zmq.PAIR)
+                # task.connect(str(task_addr))
+                task.connect_in(str(task_addr))
+                # self.task_stream = zmqstream.ZMQStream(task, self.loop)
+                self.task_stream = taskthread.QueueStream(*task.queues)
+                task.start()
             
             hbs = msg.content.heartbeat
             self.heart = heartbeat.Heart(*map(str, hbs), heart_id=self.heart_id)
-            ioloop.DelayedCallback(self.heart.start, 1000, self.loop).start()
+            self.heart.start()
+            # ioloop.DelayedCallback(self.heart.start, 1000, self.loop).start()
             # placeholder for now:
             pub = self.context.socket(zmq.PUB)
-            self.kernel = kernel.Kernel(self.session, self.queue, pub, self.task_queue)
+            # create and start the kernel
+            self.kernel = kernel.Kernel(self.session, self.queue, pub, self.task_stream)
             self.kernel.start()
         else:
             # logger.error("Registration Failed: %s"%msg)

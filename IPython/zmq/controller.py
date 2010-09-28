@@ -72,13 +72,14 @@ class Controller(object):
     task_addr: zmq connection address of the XREQ socket for task queue
     """
     # internal data structures:
-    ids=None
+    ids=None # engine IDs
     keytable=None
     engines=None
     clients=None
     hearts=None
     pending=None
     results=None
+    mia=None
     incoming_registrations=None
     registration_timeout=None
     
@@ -117,6 +118,7 @@ class Controller(object):
         self.by_ident = {}
         self.clients = {}
         self.hearts = {}
+        self.mia = set()
         
         # self.sockets = {}
         self.loop = loop
@@ -261,6 +263,8 @@ class Controller(object):
             self.save_task_request(idents, msg)
         elif switch == 'outtask':
             self.save_task_result(idents, msg)
+        elif switch == 'tracktask':
+            self.save_task_destination(idents, msg)
         else:
             logger.error("Invalid message topic: %s"%switch)
         
@@ -298,16 +302,16 @@ class Controller(object):
         """"""
         raise NotImplementedError
     
-    #-----------------------------------------------------------------------------
+    #---------------------------------------------------------------------------
     # handler methods (1 per event)
-    #-----------------------------------------------------------------------------
+    #---------------------------------------------------------------------------
     
     ### Heartbeat ###
     
     def handle_new_heart(self, heart):
         """handler to attach to heartbeater.
-        called when a new heart starts to beat.
-        triggers completion of registration"""
+        Called when a new heart starts to beat.
+        Triggers completion of registration."""
         logger.debug("heartbeat::handle_new_heart(%s)"%heart)
         if heart not in self.incoming_registrations:
             logger.info("heartbeat::ignoring new heart: %s"%heart)
@@ -326,7 +330,7 @@ class Controller(object):
         else:
             self.unregister_engine(heart, dict(content=dict(id=eid)))
     
-    ### Queue Traffic ###
+    ### MUX Queue Traffic ###
     
     def save_queue_request(self, idents, msg):
         queue_id, client_id = idents[:2]
@@ -390,6 +394,7 @@ class Controller(object):
         
         header = msg['header']
         msg_id = header['msg_id']
+        self.mia.add(msg_id)
         self.pending[msg_id] = msg
         if not self.tasks.has_key(client_id):
             self.tasks[client_id] = []
@@ -415,6 +420,29 @@ class Controller(object):
             self.pending.pop(msg_id)
         else:
             logger.debug("task:: unknown task %s finished"%msg_id)
+    
+    def save_task_destination(self, idents, msg):
+        try:
+            msg = self.session.unpack_message(msg, content=False)
+        except:
+            logger.error("task::invalid task tracking message")
+            return
+        content = msg['content']
+        engine_id = content['engine_id']
+        msg_id = content['msg_id']
+        logger.info("task:: task %s arrived on %s"%(msg_id, engine_id))
+        if msg_id in self.mia:
+            self.mia.remove(msg_id)
+        else:
+            logger.debug("task:: task %s not listed as MIA?!"%(msg_id))
+        self.tasks[engine_id].append(msg_id)
+    
+    def mia_task_request(self, idents, msg):
+        client_id = idents[0]
+        content = dict(mia=self.mia,status='ok')
+        self.session.send('mia_reply', content=content, idents=client_id)
+        
+        
             
     ######### Registrar Handlers #########
         

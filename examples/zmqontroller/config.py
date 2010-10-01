@@ -10,6 +10,8 @@ config = {
     'ctaskport': 10221,
     'etaskport': 10121,
     
+    'ccontrolport': 10231,
+    'econtrolport': 10131,
     
     'clientport': 10201,
     'notifierport': 10202,

@@ -7,6 +7,7 @@ import __builtin__
 import sys
 import time
 import traceback
+from signal import SIGTERM, SIGKILL
 
 from code import CommandCompiler
 
@@ -128,25 +129,35 @@ class RawInput(object):
 
 class Kernel(object):
 
-    def __init__(self, session, reply_stream, pub_stream, task_stream=None):
+    def __init__(self, session, control_stream, reply_stream, pub_stream, 
+                                            task_stream=None, client=None):
         self.session = session
+        self.control_stream = control_stream
         self.reply_stream = reply_stream
         self.task_stream = task_stream
         self.pub_stream = pub_stream
+        self.client = client
         self.user_ns = {}
         self.history = []
         self.compiler = CommandCompiler()
         self.completer = KernelCompleter(self.user_ns)
+        self.aborted = set()
         
         # Build dict of handlers for message types
-        self.handlers = {}
+        self.queue_handlers = {}
+        self.control_handlers = {}
         for msg_type in ['execute_request', 'complete_request', 'apply_request']:
-            self.handlers[msg_type] = getattr(self, msg_type)
+            self.queue_handlers[msg_type] = getattr(self, msg_type)
+        
+        for msg_type in ['kill_request', 'abort_request']:
+            self.control_handlers[msg_type] = getattr(self, msg_type)
 
-    def abort_queue(self):
+    #-------------------- control handlers -----------------------------
+    
+    def abort_queue(self, stream):
         while True:
             try:
-                msg = self.session.recv(self.reply_stream, zmq.NOBLOCK,content=True)
+                msg = self.session.recv(stream, zmq.NOBLOCK,content=True)
             except zmq.ZMQError, e:
                 if e.errno == zmq.EAGAIN:
                     break
@@ -167,13 +178,88 @@ class Kernel(object):
             # reply_msg = self.session.msg(reply_type, {'status' : 'aborted'}, msg)
             # self.reply_socket.send(ident,zmq.SNDMORE)
             # self.reply_socket.send_json(reply_msg)
-            reply_msg = self.session.send(self.reply_socket, reply_type, 
-                        content={'status' : 'aborted'}, parent=msg, ident=idents[0])
+            reply_msg = self.session.send(stream, reply_type, 
+                        content={'status' : 'aborted'}, parent=msg, ident=idents)
             print>>sys.__stdout__, Message(reply_msg)
             # We need to wait a bit for requests to come in. This can probably
             # be set shorter for true asynchronous clients.
-            time.sleep(0.1)
+            time.sleep(0.05)
+    
+    def abort_request(self, stream, ident, parent):
+        msg_ids = parent['content'].get('msg_ids', None)
+        if not msg_ids:
+            self.abort_queue(self.task_stream)
+            self.abort_queue(self.reply_stream)
+        for mid in msg_ids:
+            self.aborted.add(mid)
+        
+        content = dict(status='ok')
+        self.session.send(stream, 'abort_reply', content=content, parent=parent,
+                                                                    ident=ident)
+    
+    def kill_request(self, stream, idents, parent):
+        self.abort_queue(self.reply_stream)
+        if self.task_stream:
+            self.abort_queue(self.task_stream)
+        msg = self.session.send(stream, 'kill_reply', ident=idents, parent=parent, 
+                content = dict(status='ok'))
+        # we can know that a message is done if we *don't* use streams, but 
+        # use a socket directly with MessageTracker
+        time.sleep(1)
+        os.kill(os.getpid(), SIGTERM)
+        time.sleep(.25)
+        os.kill(os.getpid(), SIGKILL)
+    
+    def dispatch_control(self, msg):
+        idents,msg = self.session.feed_identities(msg, copy=False)
+        msg = self.session.unpack_message(msg, content=True, copy=False)
+        
+        header = msg['header']
+        msg_id = header['msg_id']
+        
+        handler = self.control_handlers.get(msg['msg_type'], None)
+        if handler is None:
+            print >> sys.__stderr__, "UNKNOWN CONTROL MESSAGE TYPE:", msg
+        else:
+            handler(stream, idents, msg)
+    
+    def flush_control(self):
+        while any(zmq.select([self.control_socket],[],[],1e-4)):
+            try:
+                msg = self.control_socket.recv_multipart(zmq.NOBLOCK, copy=False)
+            except zmq.ZMQError, e:
+                if e.errno != zmq.EAGAIN:
+                    raise e
+                return
+            else:
+                self.dispatch_control(msg)
+    
 
+    #-------------------- queue helpers ------------------------------
+    
+    def check_dependencies(self, dependencies):
+        if not dependencies:
+            return True
+        if len(dependencies) == 2 and dependencies[0] in 'any all'.split():
+            anyorall = dependencies[0]
+            dependencies = dependencies[1]
+        else:
+            anyorall = 'all'
+        results = self.client.get_results(dependencies,status_only=True)
+        if results['status'] != 'ok':
+            return False
+        
+        if anyorall == 'any':
+            if not results['completed']:
+                return False
+        else:
+            if results['pending']:
+                return False
+        
+        return True
+    
+    #-------------------- queue handlers -----------------------------
+    
     def execute_request(self, stream, ident, parent):
         try:
             code = parent[u'content'][u'code']
@@ -295,49 +381,57 @@ class Kernel(object):
         if reply_msg['content']['status'] == u'error':
             self.abort_queue()
     
-    def recv_queue(self, stream, msg):
-        # try:
-            idents,msg = self.session.feed_identities(msg, copy=False)
-            msg = self.session.unpack_message(msg, content=True, copy=False)
-            # print idents, msg
-            # omsg = Message(msg)
-            handler = self.handlers.get(msg['msg_type'], None)
-            if handler is None:
-                print >> sys.__stderr__, "UNKNOWN MESSAGE TYPE:", msg
-            else:
-                handler(stream, idents, msg)
-        # except Exception, e:
-        #     raise e
+    def dispatch_queue(self, stream, msg):
+        self.flush_control()
+        idents,msg = self.session.feed_identities(msg, copy=False)
+        msg = self.session.unpack_message(msg, content=True, copy=False)
+        
+        header = msg['header']
+        msg_id = header['msg_id']
+        dependencies = header.get('dependencies', [])
+        
+        if self.check_aborted(msg_id):
+            return self.abort_reply(stream, msg)
+        if not self.check_dependencies(dependencies):
+            return self.unmet_dependencies(stream, msg)
+        
+        handler = self.queue_handlers.get(msg['msg_type'], None)
+        if handler is None:
+            print >> sys.__stderr__, "UNKNOWN MESSAGE TYPE:", msg
+        else:
+            handler(stream, idents, msg)
     
     def start(self):
         #### stream mode:
-        # if self.reply_stream:
-        #     self.reply_stream.on_recv(lambda msg: 
-        #             self.recv_queue(self.reply_stream, msg), copy=False)
-        # if self.task_queue:
-        #     self.task_stream.on_recv(lambda msg: 
-        #             self.recv_queue(self.task_stream, msg), copy=False)
+        if self.control_stream:
+            self.control_stream.on_recv(self.dispatch_control, copy=False)
+        if self.reply_stream:
+            self.reply_stream.on_recv(lambda msg: 
+                    self.dispatch_queue(self.reply_stream, msg), copy=False)
+        if self.task_stream:
+            self.task_stream.on_recv(lambda msg: 
+                    self.dispatch_queue(self.task_stream, msg), copy=False)
         
         #### while True mode:
-        while True:
-            idle = True
-            try:
-                msg = self.reply_stream.socket.recv_multipart(
-                            zmq.NOBLOCK, copy=False)
-            except zmq.ZMQError, e:
-                if e.errno != zmq.EAGAIN:
-                    raise e
-            else:
-                idle=False
-                self.recv_queue(self.reply_stream, msg)
-                    
-            if not self.task_stream.empty():
-                idle=False
-                msg = self.task_stream.recv_multipart()
-                self.recv_queue(self.task_stream, msg)
-            if idle:
-                # don't busywait
-                time.sleep(1e-3)
+        # while True:
+        #     idle = True
+        #     try:
+        #         msg = self.reply_stream.socket.recv_multipart(
+        #                     zmq.NOBLOCK, copy=False)
+        #     except zmq.ZMQError, e:
+        #         if e.errno != zmq.EAGAIN:
+        #             raise e
+        #     else:
+        #         idle=False
+        #         self.dispatch_queue(self.reply_stream, msg)
+        #             
+        #     if not self.task_stream.empty():
+        #         idle=False
+        #         msg = self.task_stream.recv_multipart()
+        #         self.dispatch_queue(self.task_stream, msg)
+        #     if idle:
+        #         # don't busywait
+        #         time.sleep(1e-3)
 
 
 def main():

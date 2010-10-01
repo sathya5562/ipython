@@ -535,21 +535,28 @@ class Client(object):
         return len(theids.intersection(self.outstanding)) == 0
     
     @spinfirst
-    def get_result(self, msg_id):
+    def get_results(self, msg_ids,status_only=False):
         """returns the result of the execute or task request with `msg_id`"""
-        if isinstance(msg_id, int):
-            msg_id = self.history[msg_id]
+        if not isinstance(msg_ids, (list,tuple)):
+            msg_ids = [msg_ids]
+        theids = []
+        for msg_id in msg_ids:
+            if isinstance(msg_id, int):
+                msg_id = self.history[msg_id]
+            theids.append(msg_id)
         
-        content = dict(msg_id=msg_id)
+        content = dict(msg_ids=theids, status_only=status_only)
         msg = self.session.send(self.controller_socket, "result_request", content=content)
-        while True:
-            try:
-                idents,msg = self.session.recv(self.controller_socket, zmq.NOBLOCK)
-            except zmq.ZMQError:
-                time.sleep(1e-3)
-                continue
-            else:
-                break
-        return msg
+        zmq.select([self.controller_socket], [], [])
+        idents,msg = self.session.recv(self.controller_socket, zmq.NOBLOCK)
+        
+        # while True:
+        #     try:
+        #     except zmq.ZMQError:
+        #         time.sleep(1e-3)
+        #         continue
+        #     else:
+        #         break
+        return msg['content']
     
     

@@ -30,6 +30,8 @@ def setup():
     eqport = config['equeueport']
     ctport = config['ctaskport']
     etport = config['etaskport']
+    ccport = config['ccontrolport']
+    ecport = config['econtrolport']
     hport = config['heartport']
     nport = config['notifierport']
     
@@ -62,7 +64,7 @@ def setup():
     hrep = ctx.socket(zmq.XREP)
     hrep.bind("%s:%i"%(iface, hport+1))
     
-    hb = heartbeat.HeartBeater(loop, ZMQStream(hpub,loop), ZMQStream(hrep,loop), 1000)
+    hb = heartbeat.HeartMonitor(loop, ZMQStream(hpub,loop), ZMQStream(hrep,loop),2500)
     hb.start()
     
     ### Client connections ###
@@ -83,10 +85,18 @@ def setup():
     monport = sub.bind_to_random_port(iface)
     sub = ZMQStream(sub, loop)
     
-    # Multiplexer Queue (in a Thread)
-    q = ThreadMonitoredQueue(zmq.XREP, zmq.XREP, zmq.PUB, 'in', 'out')
+    # Multiplexer Queue (in a Process)
+    q = ProcessMonitoredQueue(zmq.XREP, zmq.XREP, zmq.PUB, 'in', 'out')
     q.bind_in("%s:%i"%(iface, cqport))
     q.bind_out("%s:%i"%(iface, eqport))
+    q.connect_mon("%s:%i"%(iface, monport))
+    q.daemon=True
+    q.start()
+    
+    # Control Queue (in a Process)
+    q = ProcessMonitoredQueue(zmq.XREP, zmq.XREP, zmq.PUB, 'incontrol', 'outcontrol')
+    q.bind_in("%s:%i"%(iface, ccport))
+    q.bind_out("%s:%i"%(iface, ecport))
     q.connect_mon("%s:%i"%(iface, monport))
     q.daemon=True
     q.start()
@@ -103,12 +113,15 @@ def setup():
     
     # build connection dicts
     engine_addrs = {
+        'control' : "%s:%i"%(iface, ecport),
         'queue': "%s:%i"%(iface, eqport),
         'heartbeat': ("%s:%i"%(iface, hport), "%s:%i"%(iface, hport+1)),
-        'task' : "%s:%i"%(iface, etport)
+        'task' : "%s:%i"%(iface, etport),
+        'monitor' : "%s:%i"%(iface, monport),
         }
     
     client_addrs = {
+        'control' : "%s:%i"%(iface, ccport),
         'controller': "%s:%i"%(iface, cport),
         'queue': "%s:%i"%(iface, cqport),
         'task' : "%s:%i"%(iface, ctport),

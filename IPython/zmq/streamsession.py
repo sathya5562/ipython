@@ -57,6 +57,9 @@ else: # 2,4
 #     default_packer = to_json
 #     default_unpacker = json.loads
 
+
+DELIM="<IDS|MSG>"
+
 def wrap_exception():
     etype, evalue, tb = sys.exc_info()
     tb = traceback.format_exception(etype, evalue, tb)
@@ -321,6 +324,7 @@ class StreamSession(object):
             to_send.extend(ident)
         elif ident is not None:
             to_send.append(ident)
+        to_send.append(DELIM)
         to_send.append(self.pack(msg['header']))
         to_send.append(self.pack(msg['parent_header']))
         # if parent is None:
@@ -384,13 +388,12 @@ class StreamSession(object):
                 s = msg[0]
             else:
                 s = msg[0].bytes
-            try:
-                _ = self.unpack(s)
-            except:
+            if s == DELIM:
+                msg.pop(0)
+                break
+            else:
                 idents.append(s)
                 msg.pop(0)
-            else:
-                break
                 
         return idents, msg
     

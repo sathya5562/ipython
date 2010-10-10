@@ -183,7 +183,8 @@ class Controller(object):
             
         self.client_handlers = {'queue_request': self.queue_status,
                                 'result_request': self.get_results,
-                                'purge_request': self.purge_results
+                                'purge_request': self.purge_results,
+                                'resubmit_request': self.resubmit_task,
                                 }
         
         self.registrar_handlers = {'registration_request' : self.register_engine,
@@ -664,6 +665,36 @@ class Controller(object):
     
     def purge_results(self, client_id, msg):
         content = msg['content']
+        msg_ids = content.get('msg_ids', [])
+        reply = dict(status='ok')
+        if msg_ids == 'all':
+            self.results = {}
+        else:
+            for msg_id in msg_ids:
+                if msg_id in self.results:
+                    self.results.pop(msg_id)
+                else:
+                    if msg_id in self.pending:
+                        reply = dict(status='error', reason="msg pending: %r"%msg_id)
+                    else:
+                        reply = dict(status='error', reason="No such msg: %r"%msg_id)
+                    break
+            eids = content.get('engine_ids', [])
+            for eid in eids:
+                if eid not in self.engines:
+                    reply = dict(status='error', reason="No such engine: %i"%eid)
+                    break
+                msg_ids = self.completed.pop(eid)
+                for msg_id in msg_ids:
+                    self.results.pop(msg_id)
+        
+        self.sesison.send(self.clientele, 'purge_reply', content=reply, ident=client_id)
+    
+    def resubmit_task(self, client_id, msg, buffers):
+        content = msg['content']
+        header = msg['header']
+        
+        
         msg_ids = content.get('msg_ids', [])
         reply = dict(status='ok')
         if msg_ids == 'all':

@@ -2,8 +2,17 @@
 import os
 import uuid
 import zmq
+
+from zmq.tests import BaseZMQTestCase
+
 from IPython.zmq.tests import SessionTestCase
 from IPython.zmq import streamsession as ss
+
+class SessionTestCase(BaseZMQTestCase):
+    
+    def setUp(self):
+        BaseZMQTestCase.setUp(self)
+        self.session = ss.StreamSession()
 
 class TestSession(SessionTestCase):
     

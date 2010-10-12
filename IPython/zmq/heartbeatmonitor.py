@@ -1,8 +1,7 @@
 #!/usr/bin/env python
 """
-A basic heartbeater using PUB and XREP sockets. pings are sent out on the PUB, and hearts
-are tracked based on their XREQ identities.
-For use with heart.py
+A multi-heart Heartbeat system using PUB and XREP sockets. pings are sent out on the PUB,
+and hearts are tracked based on their XREQ identities.
 """
 
 import time

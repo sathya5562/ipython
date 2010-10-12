@@ -10,7 +10,7 @@ from zmq.eventloop import ioloop
 from zmq.eventloop.zmqstream import ZMQStream
 from zmq.log import handlers
 
-from IPython.zmq import controller, log, streamsession as session, heartbeat
+from IPython.zmq import controller, heartmonitor, log, streamsession as session
   
   
 
@@ -64,7 +64,7 @@ def setup():
     hrep = ctx.socket(zmq.XREP)
     hrep.bind("%s:%i"%(iface, hport+1))
     
-    hb = heartbeat.HeartMonitor(loop, ZMQStream(hpub,loop), ZMQStream(hrep,loop),2500)
+    hb = heartmonitor.HeartMonitor(loop, ZMQStream(hpub,loop), ZMQStream(hrep,loop),2500)
     hb.start()
     
     ### Client connections ###

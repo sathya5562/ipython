@@ -14,7 +14,7 @@ from zmq.eventloop import ioloop, zmqstream
 from streamsession import Message, StreamSession
 from client import Client
 import streamkernel as kernel
-import heartbeat
+import heartmonitor
 import taskthread
 # from log import logger
 
@@ -88,7 +88,7 @@ class Engine(object):
                 # task.start()
             
             hbs = msg.content.heartbeat
-            self.heart = heartbeat.Heart(*map(str, hbs), heart_id=self.heart_id)
+            self.heart = heartmonitor.Heart(*map(str, hbs), heart_id=self.heart_id)
             self.heart.start()
             # ioloop.DelayedCallback(self.heart.start, 1000, self.loop).start()
             # placeholder for now:

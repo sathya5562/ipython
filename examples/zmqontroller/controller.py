@@ -10,7 +10,9 @@ from zmq.eventloop import ioloop
 from zmq.eventloop.zmqstream import ZMQStream
 from zmq.log import handlers
 
-from IPython.zmq import controller, heartmonitor, log, streamsession as session
+from IPython.zmq import log
+from IPython.zmq.parallel import controller, heartmonitor, streamsession as session
+
   
   
 

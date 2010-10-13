@@ -22,7 +22,7 @@ import uuid
 
 # internal:
 from streamsession import Message, wrap_exception # default_unpacker as unpack, default_packer as pack
-from log import logger # a Logger object
+from IPython.zmq.log import logger # a Logger object
 
 # from messages import json # use the same import switches
 

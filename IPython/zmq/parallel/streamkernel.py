@@ -16,7 +16,7 @@ from zmq.eventloop import ioloop, zmqstream
 
 from streamsession import StreamSession, Message, extract_header, serialize_object,\
                 unpack_apply_message
-from completer import KernelCompleter
+from IPython.zmq.completer import KernelCompleter
 
 class OutStream(object):
     """A file like object that publishes the stream to a 0MQ PUB socket."""

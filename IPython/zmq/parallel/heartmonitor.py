@@ -12,7 +12,7 @@ from zmq.devices import ProcessDevice
 from zmq.eventloop import ioloop, zmqstream
 
 #internal
-from log import logger
+from IPython.zmq.log import logger
 
 class Heart(object):
     """A basic heart object for responding to a HeartMonitor.

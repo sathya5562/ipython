@@ -10,23 +10,11 @@ import pprint
 import uuid
 
 import zmq
+from zmq.utils import jsonapi
 from zmq.eventloop.zmqstream import ZMQStream
 
 from IPython.zmq.pickleutil import can, uncan, canSequence, uncanSequence
 from IPython.zmq.newserialized import serialize, unserialize
-
-try:
-    import cjson
-    json = cjson
-except ImportError:
-    cjson = None
-    try:
-        import json
-    except:
-        try:
-            import simplejson as json
-        except ImportError:
-            json = None
 
 try:
     import cPickle
@@ -35,27 +23,24 @@ except:
     cPickle = None
     import pickle
 
-
-if cjson is not None:
-    to_json = lambda o: json.encode(o)
-    from_json = json.decode
+# packer priority: jsonlib[2], cPickle, simplejson/json, pickle
+json_name = '' if not jsonapi.jsonmod else jsonapi.jsonmod.__name__
+if json_name in ('jsonlib', 'jsonlib2'):
+    use_json = True
+elif json_name:
+    if cPickle is None:
+        use_json = True
+    else:
+        use_json = False
 else:
-    to_json = lambda o: json.dumps(o, separators=(',',':'))
-    from_json = json.loads
+    use_json = False
 
-to_pickle = lambda o: pickle.dumps(o, 2)
-
-# packer priority: cjson, cPickle, json/simplejson, pickle
-
-if cjson is not None or (cPickle is None and json is not None): # 1,3
-    default_packer = to_json
-    default_unpacker = from_json
-else: # 2,4
-    default_packer = to_pickle
+if use_json:
+    default_packer = jsonapi.dumps
+    default_unpacker = jsonapi.loads
+else:
+    default_packer = lambda o: pickle.dumps(o,-1)
     default_unpacker = pickle.loads
-# else:
-#     default_packer = to_json
-#     default_unpacker = json.loads
 
 
 DELIM="<IDS|MSG>"

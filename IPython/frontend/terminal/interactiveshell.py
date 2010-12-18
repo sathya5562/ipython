@@ -590,6 +590,38 @@ class TerminalInteractiveShell(InteractiveShell):
         See also
         --------
         cpaste: manually paste code into terminal until you mark its end.
+
+        Example
+        -------
+        The text is pulled directly from the clipboard without user
+        intervention and printed back on the screen before execution.
+        Take the same code from %cpaste and make the code print by using 
+        print options::
+
+            In [9]: %cpaste
+            Pasting code; enter '--' alone on the line to stop.
+            :a=1
+            :b=2
+            :--
+        Now use the same date to be printed by using %paste option
+            In [10]: %paste -r
+            Re-executing 'a=1...' (8 chars)
+
+            In [11]: a
+            Out[11]: 1
+
+            In [12]: b
+            Out[12]: 2
+
+        %paste-q quiet mode: do not echo the pasted text back to the terminal
+          
+
+            
+   
+                    
+
+
+
         """
         opts,args = self.parse_options(parameter_s,'rq',mode='string')
         par = args.strip()
